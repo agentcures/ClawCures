@@ -1,0 +1,26 @@
+{
+  "calls": [
+    {
+      "tool": "refua_validate_spec",
+      "args": {
+        "action": "fold",
+        "name": "initial_kras_probe",
+        "entities": [
+          {
+            "type": "protein",
+            "id": "A",
+            "sequence": "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ"
+          },
+          {
+            "type": "ligand",
+            "id": "lig",
+            "smiles": "CCO"
+          }
+        ],
+        "affinity": {
+          "binder": "lig"
+        }
+      }
+    }
+  ]
+}

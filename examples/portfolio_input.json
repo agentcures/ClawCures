@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Pancreatic cancer",
+    "burden": 0.92,
+    "tractability": 0.45,
+    "unmet_need": 0.95,
+    "translational_readiness": 0.62,
+    "novelty": 0.70
+  },
+  {
+    "name": "Tuberculosis",
+    "burden": 0.88,
+    "tractability": 0.68,
+    "unmet_need": 0.90,
+    "translational_readiness": 0.58,
+    "novelty": 0.66
+  },
+  {
+    "name": "Alzheimer's disease",
+    "burden": 0.94,
+    "tractability": 0.30,
+    "unmet_need": 0.89,
+    "translational_readiness": 0.41,
+    "novelty": 0.75
+  }
+]
