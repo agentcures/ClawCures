@@ -19,3 +19,5 @@ def test_run_autonomous_defaults_to_all_disease_objective() -> None:
 def test_default_tool_list_includes_protein_properties() -> None:
     assert "refua_protein_properties" in DEFAULT_TOOL_LIST
     assert "refua_clinical_simulator" in DEFAULT_TOOL_LIST
+    assert "refua_data_list" in DEFAULT_TOOL_LIST
+    assert "refua_data_query" in DEFAULT_TOOL_LIST

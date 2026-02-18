@@ -12,6 +12,10 @@ DEFAULT_TOOL_LIST: tuple[str, ...] = (
     "refua_antibody_design",
     "refua_protein_properties",
     "refua_clinical_simulator",
+    "refua_data_list",
+    "refua_data_fetch",
+    "refua_data_materialize",
+    "refua_data_query",
     "refua_job",
     "refua_admet_profile",
 )
