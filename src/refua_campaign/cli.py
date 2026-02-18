@@ -15,17 +15,7 @@ from refua_campaign.openclaw_client import OpenClawClient
 from refua_campaign.orchestrator import CampaignOrchestrator
 from refua_campaign.portfolio import PortfolioWeights, rank_disease_programs
 from refua_campaign.prompts import load_system_prompt
-from refua_campaign.refua_mcp_adapter import RefuaMcpAdapter
-
-
-_STATIC_TOOL_LIST = [
-    "refua_validate_spec",
-    "refua_fold",
-    "refua_affinity",
-    "refua_antibody_design",
-    "refua_job",
-    "refua_admet_profile",
-]
+from refua_campaign.refua_mcp_adapter import DEFAULT_TOOL_LIST, RefuaMcpAdapter
 
 DEFAULT_OBJECTIVE = (
     "Find cures for all diseases by prioritizing the highest-burden conditions and "
@@ -35,7 +25,7 @@ DEFAULT_OBJECTIVE = (
 
 class _StaticToolAdapter:
     def available_tools(self) -> list[str]:
-        return list(_STATIC_TOOL_LIST)
+        return list(DEFAULT_TOOL_LIST)
 
     def execute_plan(self, _plan: dict[str, object]) -> list[object]:
         raise RuntimeError(
@@ -206,7 +196,7 @@ def _cmd_print_default_prompt(_args: argparse.Namespace) -> int:
 def _cmd_list_tools(_args: argparse.Namespace) -> int:
     adapter, adapter_error = _build_adapter()
     if adapter_error is not None:
-        names = list(_STATIC_TOOL_LIST)
+        names = list(DEFAULT_TOOL_LIST)
         print(f"warning: {adapter_error}", file=sys.stderr)
         print("warning: using static tool list fallback.", file=sys.stderr)
     else:

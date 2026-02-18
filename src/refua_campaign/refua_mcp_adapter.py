@@ -5,6 +5,17 @@ from pathlib import Path
 import sys
 from typing import Any, Callable
 
+DEFAULT_TOOL_LIST: tuple[str, ...] = (
+    "refua_validate_spec",
+    "refua_fold",
+    "refua_affinity",
+    "refua_antibody_design",
+    "refua_protein_properties",
+    "refua_clinical_simulator",
+    "refua_job",
+    "refua_admet_profile",
+)
+
 
 def _import_refua_mcp_server():
     first_error: ModuleNotFoundError | None = None
@@ -35,19 +46,51 @@ def _import_refua_mcp_server():
         ) from exc
 
 
+def _discover_tool_names(server: Any) -> list[str]:
+    tool_manager = getattr(getattr(server, "mcp", None), "_tool_manager", None)
+    if tool_manager is None:
+        return []
+
+    list_tools = getattr(tool_manager, "list_tools", None)
+    if not callable(list_tools):
+        return []
+
+    try:
+        tool_infos = list_tools()
+    except Exception:
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for info in tool_infos:
+        name = getattr(info, "name", None)
+        if not isinstance(name, str) or not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
 def _load_tool_map() -> dict[str, Callable[..., Any]]:
     server = _import_refua_mcp_server()
 
-    tool_map: dict[str, Callable[..., Any]] = {
-        "refua_validate_spec": server.refua_validate_spec,
-        "refua_fold": server.refua_fold,
-        "refua_affinity": server.refua_affinity,
-        "refua_antibody_design": server.refua_antibody_design,
-        "refua_job": server.refua_job,
-    }
-    admet_tool = getattr(server, "refua_admet_profile", None)
-    if callable(admet_tool):
-        tool_map["refua_admet_profile"] = admet_tool
+    tool_map: dict[str, Callable[..., Any]] = {}
+
+    for name in _discover_tool_names(server):
+        fn = getattr(server, name, None)
+        if callable(fn):
+            tool_map[name] = fn
+
+    if tool_map:
+        return tool_map
+
+    for name in DEFAULT_TOOL_LIST:
+        fn = getattr(server, name, None)
+        if callable(fn):
+            tool_map[name] = fn
+
+    if not tool_map:
+        raise RuntimeError("No executable refua-mcp tools were discovered.")
     return tool_map
 
 
