@@ -14,6 +14,10 @@ from refua_campaign.config import CampaignRunConfig, OpenClawConfig
 from refua_campaign.openclaw_client import OpenClawClient
 from refua_campaign.orchestrator import CampaignOrchestrator
 from refua_campaign.portfolio import PortfolioWeights, rank_disease_programs
+from refua_campaign.promising_cures import (
+    extract_promising_cures,
+    summarize_promising_cures,
+)
 from refua_campaign.prompts import load_system_prompt
 from refua_campaign.refua_mcp_adapter import DEFAULT_TOOL_LIST, RefuaMcpAdapter
 
@@ -247,19 +251,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if adapter_error is not None:
             raise RuntimeError(str(adapter_error))
         results = orchestrator.execute_plan(plan)
+        serialized_results = [
+            {
+                "tool": item.tool,
+                "args": item.args,
+                "output": item.output,
+            }
+            for item in results
+        ]
+        promising_cures = extract_promising_cures(serialized_results)
         payload = {
             "objective": run_config.objective,
             "system_prompt": system_prompt,
             "planner_response_text": planner_text,
             "plan": plan,
-            "results": [
-                {
-                    "tool": item.tool,
-                    "args": item.args,
-                    "output": item.output,
-                }
-                for item in results
-            ],
+            "results": serialized_results,
+            "promising_cures": promising_cures,
+            "promising_cures_summary": summarize_promising_cures(promising_cures),
             "dry_run": False,
         }
 
@@ -336,7 +344,7 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
         if not isinstance(final_plan, dict):
             raise ValueError("Final plan is missing from autonomous payload.")
         results = adapter.execute_plan(final_plan)
-        payload["results"] = [
+        serialized_results = [
             {
                 "tool": item.tool,
                 "args": item.args,
@@ -344,6 +352,10 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
             }
             for item in results
         ]
+        promising_cures = extract_promising_cures(serialized_results)
+        payload["results"] = serialized_results
+        payload["promising_cures"] = promising_cures
+        payload["promising_cures_summary"] = summarize_promising_cures(promising_cures)
     elif not bool(payload.get("approved")):
         payload.setdefault("warnings", []).append(
             "Autonomous loop finished without an approved plan."

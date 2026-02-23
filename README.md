@@ -10,6 +10,7 @@ Disease-campaign orchestration that separates planning from execution:
 - Autonomous planner/critic loop with policy checks.
 - Offline plan validation and dry-run modes.
 - Portfolio ranking for disease-program prioritization.
+- Structured `promising_cures` output with full ADMET property maps and assessment text.
 
 ## Requirements
 
@@ -91,6 +92,16 @@ Run one plan + execute cycle:
 ClawCures run \
   --output artifacts/kras_campaign_run.json
 ```
+
+The run JSON now includes:
+- `promising_cures`: ranked therapeutic candidates extracted from tool outputs
+- `promising_cures_summary`: aggregate counts and ADMET coverage
+
+Each cure includes:
+- `metrics` (binding/admet/affinity/potency signals)
+- `admet.key_metrics` (`admet_score`, `safety_score`, `adme_score`, `rdkit_score` when available)
+- `admet.properties` (full ADMET scalar property map from discovered outputs)
+- `assessment` (risk/opportunity summary)
 
 Offline autonomous policy check:
 
