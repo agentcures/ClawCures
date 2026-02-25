@@ -10,6 +10,7 @@ from refua_campaign.autonomy import (
     PlanPolicy,
     evaluate_plan_policy,
 )
+from refua_campaign.clinical_trials import ClawCuresClinicalController
 from refua_campaign.config import CampaignRunConfig, OpenClawConfig
 from refua_campaign.openclaw_client import OpenClawClient
 from refua_campaign.orchestrator import CampaignOrchestrator
@@ -188,6 +189,156 @@ def build_parser() -> argparse.ArgumentParser:
     portfolio_parser.add_argument("--w-translational-readiness", type=float, default=0.10)
     portfolio_parser.add_argument("--w-novelty", type=float, default=0.10)
     portfolio_parser.set_defaults(handler=_cmd_rank_portfolio)
+
+    trial_list_parser = sub.add_parser(
+        "trials-list",
+        help="List managed clinical trials.",
+    )
+    trial_list_parser.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="Optional trial store file path override.",
+    )
+    trial_list_parser.set_defaults(handler=_cmd_trials_list)
+
+    trial_get_parser = sub.add_parser(
+        "trials-get",
+        help="Get one managed clinical trial by id.",
+    )
+    trial_get_parser.add_argument("--trial-id", required=True)
+    trial_get_parser.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="Optional trial store file path override.",
+    )
+    trial_get_parser.set_defaults(handler=_cmd_trials_get)
+
+    trial_add_parser = sub.add_parser(
+        "trials-add",
+        help="Add a managed clinical trial.",
+    )
+    trial_add_parser.add_argument("--trial-id", default=None)
+    trial_add_parser.add_argument("--config-file", type=Path, default=None)
+    trial_add_parser.add_argument("--indication", default=None)
+    trial_add_parser.add_argument("--phase", default=None)
+    trial_add_parser.add_argument("--objective", default=None)
+    trial_add_parser.add_argument("--status", default="planned")
+    trial_add_parser.add_argument(
+        "--metadata-json",
+        default=None,
+        help="Optional JSON object for trial metadata.",
+    )
+    trial_add_parser.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="Optional trial store file path override.",
+    )
+    trial_add_parser.set_defaults(handler=_cmd_trials_add)
+
+    trial_update_parser = sub.add_parser(
+        "trials-update",
+        help="Apply partial updates to a managed trial.",
+    )
+    trial_update_parser.add_argument("--trial-id", required=True)
+    trial_update_parser.add_argument(
+        "--updates-json",
+        required=True,
+        help="JSON object patch, e.g. '{\"status\":\"active\"}'.",
+    )
+    trial_update_parser.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="Optional trial store file path override.",
+    )
+    trial_update_parser.set_defaults(handler=_cmd_trials_update)
+
+    trial_remove_parser = sub.add_parser(
+        "trials-remove",
+        help="Remove a managed clinical trial.",
+    )
+    trial_remove_parser.add_argument("--trial-id", required=True)
+    trial_remove_parser.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="Optional trial store file path override.",
+    )
+    trial_remove_parser.set_defaults(handler=_cmd_trials_remove)
+
+    trial_enroll_parser = sub.add_parser(
+        "trials-enroll",
+        help="Enroll a patient (human or simulated) in a managed trial.",
+    )
+    trial_enroll_parser.add_argument("--trial-id", required=True)
+    trial_enroll_parser.add_argument("--patient-id", default=None)
+    trial_enroll_parser.add_argument("--source", default="human")
+    trial_enroll_parser.add_argument("--arm-id", default=None)
+    trial_enroll_parser.add_argument("--demographics-json", default=None)
+    trial_enroll_parser.add_argument("--baseline-json", default=None)
+    trial_enroll_parser.add_argument("--metadata-json", default=None)
+    trial_enroll_parser.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="Optional trial store file path override.",
+    )
+    trial_enroll_parser.set_defaults(handler=_cmd_trials_enroll)
+
+    trial_enroll_sim_parser = sub.add_parser(
+        "trials-enroll-simulated",
+        help="Enroll simulated patients in a managed trial.",
+    )
+    trial_enroll_sim_parser.add_argument("--trial-id", required=True)
+    trial_enroll_sim_parser.add_argument("--count", type=int, required=True)
+    trial_enroll_sim_parser.add_argument("--seed", type=int, default=None)
+    trial_enroll_sim_parser.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="Optional trial store file path override.",
+    )
+    trial_enroll_sim_parser.set_defaults(handler=_cmd_trials_enroll_simulated)
+
+    trial_result_parser = sub.add_parser(
+        "trials-result",
+        help="Add a patient result to a managed trial.",
+    )
+    trial_result_parser.add_argument("--trial-id", required=True)
+    trial_result_parser.add_argument("--patient-id", required=True)
+    trial_result_parser.add_argument(
+        "--values-json",
+        required=True,
+        help="JSON object containing endpoint/result values.",
+    )
+    trial_result_parser.add_argument("--result-type", default="endpoint")
+    trial_result_parser.add_argument("--visit", default=None)
+    trial_result_parser.add_argument("--source", default=None)
+    trial_result_parser.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="Optional trial store file path override.",
+    )
+    trial_result_parser.set_defaults(handler=_cmd_trials_result)
+
+    trial_sim_parser = sub.add_parser(
+        "trials-simulate",
+        help="Run or refresh simulation for a managed trial.",
+    )
+    trial_sim_parser.add_argument("--trial-id", required=True)
+    trial_sim_parser.add_argument("--replicates", type=int, default=None)
+    trial_sim_parser.add_argument("--seed", type=int, default=None)
+    trial_sim_parser.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="Optional trial store file path override.",
+    )
+    trial_sim_parser.set_defaults(handler=_cmd_trials_simulate)
 
     return parser
 
@@ -424,6 +575,133 @@ def _cmd_rank_portfolio(args: argparse.Namespace) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
     return 0
+
+
+def _cmd_trials_list(args: argparse.Namespace) -> int:
+    controller = _clinical_controller(args.store)
+    print(json.dumps(controller.list_trials(), indent=2))
+    return 0
+
+
+def _cmd_trials_get(args: argparse.Namespace) -> int:
+    controller = _clinical_controller(args.store)
+    print(json.dumps(controller.get_trial(str(args.trial_id)), indent=2))
+    return 0
+
+
+def _cmd_trials_add(args: argparse.Namespace) -> int:
+    controller = _clinical_controller(args.store)
+    config_payload = None
+    if args.config_file is not None:
+        config_payload = _load_mapping_file(args.config_file)
+    metadata_payload = _parse_optional_json_object(args.metadata_json, flag="--metadata-json")
+
+    payload = controller.add_trial(
+        trial_id=str(args.trial_id) if args.trial_id else None,
+        config=config_payload,
+        indication=str(args.indication) if args.indication else None,
+        phase=str(args.phase) if args.phase else None,
+        objective=str(args.objective) if args.objective else None,
+        status=str(args.status) if args.status else None,
+        metadata=metadata_payload,
+    )
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _cmd_trials_update(args: argparse.Namespace) -> int:
+    controller = _clinical_controller(args.store)
+    updates = _parse_required_json_object(args.updates_json, flag="--updates-json")
+    payload = controller.update_trial(str(args.trial_id), updates=updates)
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _cmd_trials_remove(args: argparse.Namespace) -> int:
+    controller = _clinical_controller(args.store)
+    payload = controller.remove_trial(str(args.trial_id))
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _cmd_trials_enroll(args: argparse.Namespace) -> int:
+    controller = _clinical_controller(args.store)
+    payload = controller.enroll_patient(
+        str(args.trial_id),
+        patient_id=str(args.patient_id) if args.patient_id else None,
+        source=str(args.source) if args.source else None,
+        arm_id=str(args.arm_id) if args.arm_id else None,
+        demographics=_parse_optional_json_object(args.demographics_json, flag="--demographics-json"),
+        baseline=_parse_optional_json_object(args.baseline_json, flag="--baseline-json"),
+        metadata=_parse_optional_json_object(args.metadata_json, flag="--metadata-json"),
+    )
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _cmd_trials_enroll_simulated(args: argparse.Namespace) -> int:
+    controller = _clinical_controller(args.store)
+    payload = controller.enroll_simulated_patients(
+        str(args.trial_id),
+        count=max(1, int(args.count)),
+        seed=int(args.seed) if args.seed is not None else None,
+    )
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _cmd_trials_result(args: argparse.Namespace) -> int:
+    controller = _clinical_controller(args.store)
+    values = _parse_required_json_object(args.values_json, flag="--values-json")
+    payload = controller.add_result(
+        str(args.trial_id),
+        patient_id=str(args.patient_id),
+        values=values,
+        result_type=str(args.result_type) if args.result_type else "endpoint",
+        visit=str(args.visit) if args.visit else None,
+        source=str(args.source) if args.source else None,
+    )
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _cmd_trials_simulate(args: argparse.Namespace) -> int:
+    controller = _clinical_controller(args.store)
+    payload = controller.simulate_trial(
+        str(args.trial_id),
+        replicates=int(args.replicates) if args.replicates is not None else None,
+        seed=int(args.seed) if args.seed is not None else None,
+    )
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _clinical_controller(store_path: Path | None) -> ClawCuresClinicalController:
+    return ClawCuresClinicalController(store_path=store_path)
+
+
+def _parse_optional_json_object(value: str | None, *, flag: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{flag} must be a JSON object.")
+    return parsed
+
+
+def _parse_required_json_object(value: str, *, flag: str) -> dict[str, Any]:
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{flag} must be a JSON object.")
+    return parsed
+
+
+def _load_mapping_file(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8")
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("--config-file must contain a JSON object.")
+    return payload
 
 
 def _build_adapter() -> tuple[RefuaMcpAdapter | _StaticToolAdapter, RuntimeError | None]:
