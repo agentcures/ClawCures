@@ -20,7 +20,9 @@ class ClawCuresClinicalController:
         workspace_root: Path | None = None,
         store_path: Path | None = None,
     ) -> None:
-        self._workspace_root = workspace_root.resolve() if workspace_root else _workspace_root_from_file()
+        self._workspace_root = (
+            workspace_root.resolve() if workspace_root else _workspace_root_from_file()
+        )
         self._store_path = store_path
         self._paths_ready = False
 
@@ -348,7 +350,9 @@ class ClawCuresClinicalController:
         return manager.operations_snapshot(trial_id)
 
     def _manager(self) -> Any:
-        trial_mod = self._import_refua_clinical_module("refua_clinical.trial_management")
+        trial_mod = self._import_refua_clinical_module(
+            "refua_clinical.trial_management"
+        )
 
         if self._store_path is not None:
             store = self._store_path

@@ -6,7 +6,6 @@ from pathlib import Path
 from refua_campaign.cli import main
 from refua_campaign.clinical_trials import ClawCuresClinicalController
 
-
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 
 

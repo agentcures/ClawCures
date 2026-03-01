@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from refua_campaign.promising_cures import extract_promising_cures, summarize_promising_cures
+from refua_campaign.promising_cures import (
+    extract_promising_cures,
+    summarize_promising_cures,
+)
 
 
 def test_extract_promising_cure_with_full_admet_properties() -> None:

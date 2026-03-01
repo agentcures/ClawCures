@@ -90,12 +90,16 @@ class _LoopOpenClawClient:
         phase = (metadata or {}).get("phase")
         if phase == "plan-loop":
             return OpenClawResponse(
-                raw={"output_text": '{"calls":[{"tool":"refua_validate_spec","args":{}}]}'},
+                raw={
+                    "output_text": '{"calls":[{"tool":"refua_validate_spec","args":{}}]}'
+                },
                 text='{"calls":[{"tool":"refua_validate_spec","args":{}}]}',
             )
         if phase == "critic-loop":
             return OpenClawResponse(
-                raw={"output_text": '{"approved":"false","issues":["unsafe"],"suggested_fixes":[]}'},
+                raw={
+                    "output_text": '{"approved":"false","issues":["unsafe"],"suggested_fixes":[]}'
+                },
                 text='{"approved":"false","issues":["unsafe"],"suggested_fixes":[]}',
             )
         raise AssertionError(f"Unexpected phase: {phase}")

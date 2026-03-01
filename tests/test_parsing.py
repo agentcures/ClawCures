@@ -10,7 +10,7 @@ def test_extract_json_plan_from_plain_json() -> None:
 
 
 def test_extract_json_plan_from_wrapped_text() -> None:
-    text = "Plan follows:\n```json\n{\"calls\":[{\"tool\":\"refua_job\",\"args\":{\"job_id\":\"abc\"}}]}\n```"
+    text = 'Plan follows:\n```json\n{"calls":[{"tool":"refua_job","args":{"job_id":"abc"}}]}\n```'
     plan = _extract_json_plan(text)
     assert plan["calls"][0]["args"]["job_id"] == "abc"
 
@@ -25,7 +25,7 @@ def test_extract_response_text_reads_nested_content() -> None:
         "output": [
             {
                 "content": [
-                    {"text": "{\"calls\":[]}"},
+                    {"text": '{"calls":[]}'},
                 ]
             }
         ]

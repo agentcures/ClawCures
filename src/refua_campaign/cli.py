@@ -186,7 +186,9 @@ def build_parser() -> argparse.ArgumentParser:
     portfolio_parser.add_argument("--w-burden", type=float, default=0.35)
     portfolio_parser.add_argument("--w-tractability", type=float, default=0.25)
     portfolio_parser.add_argument("--w-unmet-need", type=float, default=0.20)
-    portfolio_parser.add_argument("--w-translational-readiness", type=float, default=0.10)
+    portfolio_parser.add_argument(
+        "--w-translational-readiness", type=float, default=0.10
+    )
     portfolio_parser.add_argument("--w-novelty", type=float, default=0.10)
     portfolio_parser.set_defaults(handler=_cmd_rank_portfolio)
 
@@ -246,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     trial_update_parser.add_argument(
         "--updates-json",
         required=True,
-        help="JSON object patch, e.g. '{\"status\":\"active\"}'.",
+        help='JSON object patch, e.g. \'{"status":"active"}\'.',
     )
     trial_update_parser.add_argument(
         "--store",
@@ -594,7 +596,9 @@ def _cmd_trials_add(args: argparse.Namespace) -> int:
     config_payload = None
     if args.config_file is not None:
         config_payload = _load_mapping_file(args.config_file)
-    metadata_payload = _parse_optional_json_object(args.metadata_json, flag="--metadata-json")
+    metadata_payload = _parse_optional_json_object(
+        args.metadata_json, flag="--metadata-json"
+    )
 
     payload = controller.add_trial(
         trial_id=str(args.trial_id) if args.trial_id else None,
@@ -631,9 +635,15 @@ def _cmd_trials_enroll(args: argparse.Namespace) -> int:
         patient_id=str(args.patient_id) if args.patient_id else None,
         source=str(args.source) if args.source else None,
         arm_id=str(args.arm_id) if args.arm_id else None,
-        demographics=_parse_optional_json_object(args.demographics_json, flag="--demographics-json"),
-        baseline=_parse_optional_json_object(args.baseline_json, flag="--baseline-json"),
-        metadata=_parse_optional_json_object(args.metadata_json, flag="--metadata-json"),
+        demographics=_parse_optional_json_object(
+            args.demographics_json, flag="--demographics-json"
+        ),
+        baseline=_parse_optional_json_object(
+            args.baseline_json, flag="--baseline-json"
+        ),
+        metadata=_parse_optional_json_object(
+            args.metadata_json, flag="--metadata-json"
+        ),
     )
     print(json.dumps(payload, indent=2))
     return 0
@@ -680,7 +690,9 @@ def _clinical_controller(store_path: Path | None) -> ClawCuresClinicalController
     return ClawCuresClinicalController(store_path=store_path)
 
 
-def _parse_optional_json_object(value: str | None, *, flag: str) -> dict[str, Any] | None:
+def _parse_optional_json_object(
+    value: str | None, *, flag: str
+) -> dict[str, Any] | None:
     if value is None:
         return None
     parsed = json.loads(value)
@@ -704,7 +716,9 @@ def _load_mapping_file(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _build_adapter() -> tuple[RefuaMcpAdapter | _StaticToolAdapter, RuntimeError | None]:
+def _build_adapter() -> (
+    tuple[RefuaMcpAdapter | _StaticToolAdapter, RuntimeError | None]
+):
     try:
         return RefuaMcpAdapter(), None
     except RuntimeError as exc:

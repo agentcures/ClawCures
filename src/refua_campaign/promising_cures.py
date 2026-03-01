@@ -123,47 +123,62 @@ def _extract_cure_from_result(
 
     evidence_paths: dict[str, str] = {}
 
-    name, name_path = _pick_string(flat, aliases=[
-        "name",
-        "candidate_name",
-        "compound_name",
-        "ligand_name",
-        "binder",
-    ])
+    name, name_path = _pick_string(
+        flat,
+        aliases=[
+            "name",
+            "candidate_name",
+            "compound_name",
+            "ligand_name",
+            "binder",
+        ],
+    )
     if name_path:
         evidence_paths["name"] = name_path
 
-    smiles, smiles_path = _pick_string(flat, aliases=[
-        "smiles",
-        "ligand_smiles",
-        "compound_smiles",
-    ])
+    smiles, smiles_path = _pick_string(
+        flat,
+        aliases=[
+            "smiles",
+            "ligand_smiles",
+            "compound_smiles",
+        ],
+    )
     if smiles_path:
         evidence_paths["smiles"] = smiles_path
 
-    target, target_path = _pick_string(flat, aliases=[
-        "target",
-        "target_name",
-        "protein",
-        "antigen",
-    ])
+    target, target_path = _pick_string(
+        flat,
+        aliases=[
+            "target",
+            "target_name",
+            "protein",
+            "antigen",
+        ],
+    )
     if target_path:
         evidence_paths["target"] = target_path
 
-    binding_probability, binding_path = _pick_float(flat, aliases=[
-        "binding_probability",
-        "predicted_probability",
-        "p_bind",
-        "probability",
-    ])
+    binding_probability, binding_path = _pick_float(
+        flat,
+        aliases=[
+            "binding_probability",
+            "predicted_probability",
+            "p_bind",
+            "probability",
+        ],
+    )
     if binding_path:
         evidence_paths["binding_probability"] = binding_path
 
-    affinity, affinity_path = _pick_float(flat, aliases=[
-        "affinity",
-        "predicted_affinity",
-        "delta_g",
-    ])
+    affinity, affinity_path = _pick_float(
+        flat,
+        aliases=[
+            "affinity",
+            "predicted_affinity",
+            "delta_g",
+        ],
+    )
     if affinity_path:
         evidence_paths["affinity"] = affinity_path
 
@@ -181,13 +196,16 @@ def _extract_cure_from_result(
     if admet_score is not None:
         evidence_paths.setdefault("admet_score", "admet.properties.admet_score")
 
-    assessment, assessment_path = _pick_string(flat, aliases=[
-        "assessment",
-        "assessment_text",
-        "admet_assessment",
-        "safety_assessment",
-        "summary",
-    ])
+    assessment, assessment_path = _pick_string(
+        flat,
+        aliases=[
+            "assessment",
+            "assessment_text",
+            "admet_assessment",
+            "safety_assessment",
+            "summary",
+        ],
+    )
     if assessment_path:
         evidence_paths["assessment"] = assessment_path
 
@@ -203,11 +221,14 @@ def _extract_cure_from_result(
     if not has_signal:
         return None
 
-    explicit_score, _ = _pick_float(flat, aliases=[
-        "promising_score",
-        "priority_score",
-        "composite_score",
-    ])
+    explicit_score, _ = _pick_float(
+        flat,
+        aliases=[
+            "promising_score",
+            "priority_score",
+            "composite_score",
+        ],
+    )
     if explicit_score is None:
         score = _score_candidate(metrics=metrics, assessment=assessment)
     else:
@@ -216,15 +237,20 @@ def _extract_cure_from_result(
     if not assessment:
         assessment = _assessment_from_score(score, admet_score)
 
-    explicit_promising, _ = _pick_bool(flat, aliases=[
-        "promising",
-        "is_promising",
-        "recommended",
-        "is_recommended",
-    ])
+    explicit_promising, _ = _pick_bool(
+        flat,
+        aliases=[
+            "promising",
+            "is_promising",
+            "recommended",
+            "is_recommended",
+        ],
+    )
     if explicit_promising is None:
         lowered_assessment = (assessment or "").lower()
-        has_negative_hint = any(token in lowered_assessment for token in _NEGATIVE_ASSESSMENT_HINTS)
+        has_negative_hint = any(
+            token in lowered_assessment for token in _NEGATIVE_ASSESSMENT_HINTS
+        )
         promising = score >= float(min_score) and not has_negative_hint
     else:
         promising = bool(explicit_promising)
@@ -270,7 +296,9 @@ def _result_parts(item: Any) -> tuple[str, dict[str, Any], Any]:
     return tool, dict(args_raw) if isinstance(args_raw, Mapping) else {}, output
 
 
-def _collect_admet_properties(flat: dict[str, Any]) -> dict[str, float | str | bool | None]:
+def _collect_admet_properties(
+    flat: dict[str, Any],
+) -> dict[str, float | str | bool | None]:
     properties: dict[str, float | str | bool | None] = {}
     for path, value in flat.items():
         if not _is_scalar(value):
@@ -288,7 +316,7 @@ def _collect_admet_properties(flat: dict[str, Any]) -> dict[str, float | str | b
 
 
 def _collect_admet_key_metrics(
-    admet_properties: dict[str, float | str | bool | None]
+    admet_properties: dict[str, float | str | bool | None],
 ) -> dict[str, float | None]:
     metrics: dict[str, float | None] = {
         "admet_score": None,
@@ -324,7 +352,9 @@ def _find_admet_metric(
     return None
 
 
-def _resolve_cure_id(*, name: str | None, smiles: str | None, tool: str, index: int) -> str:
+def _resolve_cure_id(
+    *, name: str | None, smiles: str | None, tool: str, index: int
+) -> str:
     if name:
         return f"{tool}:{_slugify(name)}"
     if smiles:
@@ -343,7 +373,9 @@ def _slugify(value: str) -> str:
     return slug or "candidate"
 
 
-def _score_candidate(*, metrics: dict[str, float | None], assessment: str | None) -> float:
+def _score_candidate(
+    *, metrics: dict[str, float | None], assessment: str | None
+) -> float:
     score = 0.0
 
     binding_probability = metrics.get("binding_probability")
@@ -419,10 +451,13 @@ def _clamp01(value: float) -> float:
 
 
 def _infer_admet_status(flat: dict[str, Any]) -> str | None:
-    value, _ = _pick_string(flat, aliases=[
-        "admet_status",
-        "status",
-    ])
+    value, _ = _pick_string(
+        flat,
+        aliases=[
+            "admet_status",
+            "status",
+        ],
+    )
     if value is None:
         return None
     lowered = value.lower()
@@ -463,7 +498,9 @@ def _is_scalar(value: Any) -> bool:
     return isinstance(value, (str, int, float, bool)) or value is None
 
 
-def _pick_string(flat: dict[str, Any], aliases: list[str]) -> tuple[str | None, str | None]:
+def _pick_string(
+    flat: dict[str, Any], aliases: list[str]
+) -> tuple[str | None, str | None]:
     value, path = _pick_value(flat, aliases)
     if isinstance(value, str):
         stripped = value.strip()
@@ -472,7 +509,9 @@ def _pick_string(flat: dict[str, Any], aliases: list[str]) -> tuple[str | None, 
     return None, None
 
 
-def _pick_float(flat: dict[str, Any], aliases: list[str]) -> tuple[float | None, str | None]:
+def _pick_float(
+    flat: dict[str, Any], aliases: list[str]
+) -> tuple[float | None, str | None]:
     value, path = _pick_value(flat, aliases)
     if isinstance(value, bool):
         return None, None
@@ -486,7 +525,9 @@ def _pick_float(flat: dict[str, Any], aliases: list[str]) -> tuple[float | None,
     return None, None
 
 
-def _pick_bool(flat: dict[str, Any], aliases: list[str]) -> tuple[bool | None, str | None]:
+def _pick_bool(
+    flat: dict[str, Any], aliases: list[str]
+) -> tuple[bool | None, str | None]:
     value, path = _pick_value(flat, aliases)
     if isinstance(value, bool):
         return value, path
@@ -499,7 +540,9 @@ def _pick_bool(flat: dict[str, Any], aliases: list[str]) -> tuple[bool | None, s
     return None, None
 
 
-def _pick_value(flat: dict[str, Any], aliases: list[str]) -> tuple[Any | None, str | None]:
+def _pick_value(
+    flat: dict[str, Any], aliases: list[str]
+) -> tuple[Any | None, str | None]:
     exact_hits: list[tuple[str, Any]] = []
     loose_hits: list[tuple[str, Any]] = []
 
@@ -533,4 +576,3 @@ def _leaf_token(path: str) -> str:
     if "[" in token:
         token = token.split("[", 1)[0]
     return token
-
