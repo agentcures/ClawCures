@@ -41,8 +41,16 @@ Repository = "https://github.com/agentcures/refua"
 Documentation = "https://github.com/agentcures/refua#readme"
 Issues = "https://github.com/agentcures/refua/issues"
 
+[project.optional-dependencies]
+dev = [
+  "pre-commit>=4.5.1",
+]
+
 [project.scripts]
 ClawCures = "refua_campaign.cli:main"
+
+[tool.poetry]
+packages = [{ include = "refua_campaign", from = "src" }]
 
 [tool.setuptools]
 include-package-data = true
