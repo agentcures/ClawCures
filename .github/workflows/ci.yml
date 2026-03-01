@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install -e ".[test]" || true
+          pip install -e ".[dev]" || true
+          pip install pytest ruff mypy build twine
+
+      - name: Ruff
+        run: |
+          if grep -q "^\[tool.ruff" pyproject.toml; then
+            ruff check src tests
+          else
+            echo "No Ruff config; skipping."
+          fi
+
+      - name: Mypy
+        run: |
+          if grep -q "^\[tool.mypy" pyproject.toml; then
+            mypy src
+          else
+            echo "No mypy config; skipping."
+          fi
+
+      - name: Pytest
+        run: pytest -q
+
+      - name: Build and check distributions
+        if: matrix.python-version == '3.11'
+        run: |
+          rm -rf build dist
+          python -m build
+          python -m twine check dist/*
