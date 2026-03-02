@@ -62,13 +62,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = sub.add_parser("run", help="Run one plan+execute cycle.")
+    run_parser = sub.add_parser(
+        "run",
+        help="Run continuous plan+execute cycles (infinite by default).",
+    )
     run_parser.add_argument(
         "--objective",
         default=DEFAULT_OBJECTIVE,
         help=(
             "Campaign objective for the planner. Defaults to an all-disease cure "
             "mission focused on worst diseases and best drug-design strategies."
+        ),
+    )
+    run_parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=0,
+        help=(
+            "Number of run cycles before exit. 0 means loop forever (default). "
+            "When --dry-run is set and --max-cycles is omitted, one cycle is used."
         ),
     )
     run_parser.add_argument(
@@ -677,6 +689,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         output_path=args.output,
         dry_run=bool(args.dry_run),
     )
+    requested_max_cycles = int(args.max_cycles)
+    if requested_max_cycles < 0:
+        raise ValueError("--max-cycles must be >= 0.")
+    # Keep dry-run workflows bounded unless user explicitly requests more cycles.
+    effective_max_cycles = (
+        1 if run_config.dry_run and requested_max_cycles == 0 else requested_max_cycles
+    )
 
     adapter, adapter_error = _build_adapter()
 
@@ -722,212 +741,231 @@ def _cmd_run(args: argparse.Namespace) -> int:
         auto_web_fetch_max_chars=max(1, int(args.auto_web_fetch_max_chars)),
     )
 
-    planner_text = ""
-    plan_policy_payload: dict[str, Any] | None = None
-    if bool(args.native_tool_loop):
-        if args.plan_file is not None:
-            raise ValueError("--native-tool-loop cannot be used with --plan-file.")
-        if run_config.dry_run:
-            raise ValueError("--native-tool-loop cannot be used with --dry-run.")
-        if adapter_error is not None:
-            raise RuntimeError(str(adapter_error))
-        native_run = orchestrator.run_native_tool_loop(
-            objective=run_config.objective,
-            system_prompt=system_prompt,
-            max_rounds=max(1, int(args.native_tool_max_rounds)),
-        )
-        planner_text = native_run.planner_response_text
-        plan = native_run.plan
-        results = native_run.results
-    elif args.plan_file is not None:
-        plan_payload = json.loads(args.plan_file.read_text(encoding="utf-8"))
-        if not isinstance(plan_payload, dict):
-            raise ValueError("--plan-file must contain a JSON object.")
-        plan = plan_payload
-        planner_text = "Loaded from --plan-file"
-        results = []
-    else:
-        planner_text, plan = orchestrator.plan(
-            objective=run_config.objective,
-            system_prompt=system_prompt,
-        )
-        results = []
+    cycle_index = 0
+    loop_forever = effective_max_cycles == 0
+    try:
+        while loop_forever or cycle_index < effective_max_cycles:
+            cycle_index += 1
+            planner_text = ""
+            plan_policy_payload: dict[str, Any] | None = None
+            if bool(args.native_tool_loop):
+                if args.plan_file is not None:
+                    raise ValueError(
+                        "--native-tool-loop cannot be used with --plan-file."
+                    )
+                if run_config.dry_run:
+                    raise ValueError("--native-tool-loop cannot be used with --dry-run.")
+                if adapter_error is not None:
+                    raise RuntimeError(str(adapter_error))
+                native_run = orchestrator.run_native_tool_loop(
+                    objective=run_config.objective,
+                    system_prompt=system_prompt,
+                    max_rounds=max(1, int(args.native_tool_max_rounds)),
+                )
+                planner_text = native_run.planner_response_text
+                plan = native_run.plan
+                results = native_run.results
+            elif args.plan_file is not None:
+                plan_payload = json.loads(args.plan_file.read_text(encoding="utf-8"))
+                if not isinstance(plan_payload, dict):
+                    raise ValueError("--plan-file must contain a JSON object.")
+                plan = plan_payload
+                planner_text = "Loaded from --plan-file"
+                results = []
+            else:
+                planner_text, plan = orchestrator.plan(
+                    objective=run_config.objective,
+                    system_prompt=system_prompt,
+                )
+                results = []
 
-    apply_policy = (
-        bool(args.enforce_stage_policy)
-        or bool(args.require_evidence_before_hypothesis)
-        or bool(args.strict_plan_policy)
-    )
-    if apply_policy and not bool(args.native_tool_loop):
-        plan_policy = PlanPolicy(
-            max_calls=max(1, int(args.policy_max_calls)),
-            require_validate_first=True,
-            enforce_stage_progression=bool(args.enforce_stage_policy),
-            require_evidence_before_hypothesis=bool(
-                args.require_evidence_before_hypothesis
-            ),
-        )
-        check = evaluate_plan_policy(
-            plan,
-            allowed_tools=adapter.available_tools(),
-            policy=plan_policy,
-        )
-        plan_policy_payload = {
-            "approved": bool(check.approved),
-            "errors": list(check.errors),
-            "warnings": list(check.warnings),
-            "config": {
-                "max_calls": int(plan_policy.max_calls),
-                "require_validate_first": bool(plan_policy.require_validate_first),
-                "enforce_stage_progression": bool(
-                    plan_policy.enforce_stage_progression
-                ),
-                "require_evidence_before_hypothesis": bool(
-                    plan_policy.require_evidence_before_hypothesis
-                ),
-            },
-        }
-        if bool(args.strict_plan_policy) and not check.approved:
-            raise ValueError(
-                "Run plan failed strict policy checks: " + "; ".join(check.errors)
+            apply_policy = (
+                bool(args.enforce_stage_policy)
+                or bool(args.require_evidence_before_hypothesis)
+                or bool(args.strict_plan_policy)
             )
+            if apply_policy and not bool(args.native_tool_loop):
+                plan_policy = PlanPolicy(
+                    max_calls=max(1, int(args.policy_max_calls)),
+                    require_validate_first=True,
+                    enforce_stage_progression=bool(args.enforce_stage_policy),
+                    require_evidence_before_hypothesis=bool(
+                        args.require_evidence_before_hypothesis
+                    ),
+                )
+                check = evaluate_plan_policy(
+                    plan,
+                    allowed_tools=adapter.available_tools(),
+                    policy=plan_policy,
+                )
+                plan_policy_payload = {
+                    "approved": bool(check.approved),
+                    "errors": list(check.errors),
+                    "warnings": list(check.warnings),
+                    "config": {
+                        "max_calls": int(plan_policy.max_calls),
+                        "require_validate_first": bool(plan_policy.require_validate_first),
+                        "enforce_stage_progression": bool(
+                            plan_policy.enforce_stage_progression
+                        ),
+                        "require_evidence_before_hypothesis": bool(
+                            plan_policy.require_evidence_before_hypothesis
+                        ),
+                    },
+                }
+                if bool(args.strict_plan_policy) and not check.approved:
+                    raise ValueError(
+                        "Run plan failed strict policy checks: "
+                        + "; ".join(check.errors)
+                    )
 
-    if run_config.dry_run:
-        payload = {
-            "objective": run_config.objective,
-            "system_prompt": system_prompt,
-            "planner_response_text": planner_text,
-            "plan": plan,
-            "dry_run": True,
-            "native_tool_loop": bool(args.native_tool_loop),
-        }
-        if agent_model_map:
-            payload["agent_model_map"] = agent_model_map
-        if evidence_items:
-            payload["evidence_item_count"] = len(evidence_items)
-        payload["stream"] = bool(args.stream)
-        payload["auto_web_fetch"] = bool(args.auto_web_fetch)
-        payload["native_parallel_tool_calls"] = not bool(
-            args.disable_native_parallel_tool_calls
-        )
-        payload["native_tool_max_workers"] = max(1, int(args.native_tool_max_workers))
-        if plan_policy_payload is not None:
-            payload["plan_policy"] = plan_policy_payload
-        if adapter_error is not None:
-            payload["warnings"] = [str(adapter_error)]
-    else:
-        if adapter_error is not None and not bool(args.native_tool_loop):
-            raise RuntimeError(str(adapter_error))
-        if not bool(args.native_tool_loop):
-            results = orchestrator.execute_plan(plan)
-        serialized_results = [
-            {
-                "tool": item.tool,
-                "args": item.args,
-                "output": item.output,
-            }
-            for item in results
-        ]
-        promising_cures = extract_promising_cures(serialized_results)
-        interesting_targets = extract_interesting_targets(serialized_results)
-        evidence_quality = summarize_evidence_quality(
-            results=serialized_results,
-            interesting_targets=interesting_targets,
-            promising_cures=promising_cures,
-        )
-        failure_intelligence = build_failure_intelligence(
-            results=serialized_results,
-            promising_cures=promising_cures,
-        )
-        translational_handoff = build_translational_handoff(
-            objective=run_config.objective,
-            interesting_targets=interesting_targets,
-            promising_cures=promising_cures,
-            evidence_quality=evidence_quality,
-        )
-        payload = {
-            "objective": run_config.objective,
-            "system_prompt": system_prompt,
-            "planner_response_text": planner_text,
-            "plan": plan,
-            "results": serialized_results,
-            "promising_cures": promising_cures,
-            "promising_cures_summary": summarize_promising_cures(promising_cures),
-            "interesting_targets": interesting_targets,
-            "interesting_targets_summary": summarize_interesting_targets(
-                interesting_targets
-            ),
-            "evidence_quality_summary": evidence_quality,
-            "failure_intelligence": failure_intelligence,
-            "translational_handoff": translational_handoff,
-            "dry_run": False,
-            "native_tool_loop": bool(args.native_tool_loop),
-            "stream": bool(args.stream),
-            "auto_web_fetch": bool(args.auto_web_fetch),
-            "native_parallel_tool_calls": not bool(
-                args.disable_native_parallel_tool_calls
-            ),
-            "native_tool_max_workers": max(1, int(args.native_tool_max_workers)),
-        }
-        if plan_policy_payload is not None:
-            payload["plan_policy"] = plan_policy_payload
-        if session_key is not None:
-            payload["session_key"] = session_key
-        if store_responses is not None:
-            payload["store_responses"] = bool(store_responses)
-        if agent_model_map:
-            payload["agent_model_map"] = agent_model_map
-        if evidence_items:
-            payload["evidence_item_count"] = len(evidence_items)
+            if run_config.dry_run:
+                payload = {
+                    "objective": run_config.objective,
+                    "system_prompt": system_prompt,
+                    "planner_response_text": planner_text,
+                    "plan": plan,
+                    "dry_run": True,
+                    "native_tool_loop": bool(args.native_tool_loop),
+                }
+                if agent_model_map:
+                    payload["agent_model_map"] = agent_model_map
+                if evidence_items:
+                    payload["evidence_item_count"] = len(evidence_items)
+                payload["stream"] = bool(args.stream)
+                payload["auto_web_fetch"] = bool(args.auto_web_fetch)
+                payload["native_parallel_tool_calls"] = not bool(
+                    args.disable_native_parallel_tool_calls
+                )
+                payload["native_tool_max_workers"] = max(
+                    1, int(args.native_tool_max_workers)
+                )
+                if plan_policy_payload is not None:
+                    payload["plan_policy"] = plan_policy_payload
+                if adapter_error is not None:
+                    payload["warnings"] = [str(adapter_error)]
+            else:
+                if adapter_error is not None and not bool(args.native_tool_loop):
+                    raise RuntimeError(str(adapter_error))
+                if not bool(args.native_tool_loop):
+                    results = orchestrator.execute_plan(plan)
+                serialized_results = [
+                    {
+                        "tool": item.tool,
+                        "args": item.args,
+                        "output": item.output,
+                    }
+                    for item in results
+                ]
+                promising_cures = extract_promising_cures(serialized_results)
+                interesting_targets = extract_interesting_targets(serialized_results)
+                evidence_quality = summarize_evidence_quality(
+                    results=serialized_results,
+                    interesting_targets=interesting_targets,
+                    promising_cures=promising_cures,
+                )
+                failure_intelligence = build_failure_intelligence(
+                    results=serialized_results,
+                    promising_cures=promising_cures,
+                )
+                translational_handoff = build_translational_handoff(
+                    objective=run_config.objective,
+                    interesting_targets=interesting_targets,
+                    promising_cures=promising_cures,
+                    evidence_quality=evidence_quality,
+                )
+                payload = {
+                    "objective": run_config.objective,
+                    "system_prompt": system_prompt,
+                    "planner_response_text": planner_text,
+                    "plan": plan,
+                    "results": serialized_results,
+                    "promising_cures": promising_cures,
+                    "promising_cures_summary": summarize_promising_cures(promising_cures),
+                    "interesting_targets": interesting_targets,
+                    "interesting_targets_summary": summarize_interesting_targets(
+                        interesting_targets
+                    ),
+                    "evidence_quality_summary": evidence_quality,
+                    "failure_intelligence": failure_intelligence,
+                    "translational_handoff": translational_handoff,
+                    "dry_run": False,
+                    "native_tool_loop": bool(args.native_tool_loop),
+                    "stream": bool(args.stream),
+                    "auto_web_fetch": bool(args.auto_web_fetch),
+                    "native_parallel_tool_calls": not bool(
+                        args.disable_native_parallel_tool_calls
+                    ),
+                    "native_tool_max_workers": max(
+                        1, int(args.native_tool_max_workers)
+                    ),
+                }
+                if plan_policy_payload is not None:
+                    payload["plan_policy"] = plan_policy_payload
+                if session_key is not None:
+                    payload["session_key"] = session_key
+                if store_responses is not None:
+                    payload["store_responses"] = bool(store_responses)
+                if agent_model_map:
+                    payload["agent_model_map"] = agent_model_map
+                if evidence_items:
+                    payload["evidence_item_count"] = len(evidence_items)
 
-    if not bool(run_config.dry_run) and not bool(args.disable_state_update):
-        state_file = args.state_file or default_campaign_state_path()
-        try:
-            payload["campaign_state"] = persist_campaign_state(
-                objective=run_config.objective,
-                plan=plan,
-                results=[
-                    item
-                    for item in payload.get("results", [])
-                    if isinstance(item, dict)
-                ],
-                promising_cures=[
-                    item
-                    for item in payload.get("promising_cures", [])
-                    if isinstance(item, dict)
-                ],
-                interesting_targets=[
-                    item
-                    for item in payload.get("interesting_targets", [])
-                    if isinstance(item, dict)
-                ],
-                session_key=session_key,
-                state_path=state_file,
-            )
-        except Exception as exc:  # noqa: BLE001
-            payload.setdefault("warnings", []).append(
-                f"Campaign state update failed: {exc}"
-            )
+            if not bool(run_config.dry_run) and not bool(args.disable_state_update):
+                state_file = args.state_file or default_campaign_state_path()
+                try:
+                    payload["campaign_state"] = persist_campaign_state(
+                        objective=run_config.objective,
+                        plan=plan,
+                        results=[
+                            item
+                            for item in payload.get("results", [])
+                            if isinstance(item, dict)
+                        ],
+                        promising_cures=[
+                            item
+                            for item in payload.get("promising_cures", [])
+                            if isinstance(item, dict)
+                        ],
+                        interesting_targets=[
+                            item
+                            for item in payload.get("interesting_targets", [])
+                            if isinstance(item, dict)
+                        ],
+                        session_key=session_key,
+                        state_path=state_file,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    payload.setdefault("warnings", []).append(
+                        f"Campaign state update failed: {exc}"
+                    )
 
-    if not bool(run_config.dry_run) and args.regulatory_bundle_dir is not None:
-        try:
-            payload["regulatory_bundle"] = build_regulatory_bundle(
-                payload=payload,
-                bundle_dir=args.regulatory_bundle_dir,
-                campaign_run_path=None,
-                overwrite=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            payload.setdefault("warnings", []).append(
-                f"Regulatory bundle generation failed: {exc}"
-            )
+            if not bool(run_config.dry_run) and args.regulatory_bundle_dir is not None:
+                try:
+                    payload["regulatory_bundle"] = build_regulatory_bundle(
+                        payload=payload,
+                        bundle_dir=args.regulatory_bundle_dir,
+                        campaign_run_path=None,
+                        overwrite=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    payload.setdefault("warnings", []).append(
+                        f"Regulatory bundle generation failed: {exc}"
+                    )
 
-    rendered = json.dumps(payload, indent=2)
-    print(rendered)
+            payload["cycle_index"] = cycle_index
+            payload["max_cycles"] = int(effective_max_cycles)
+            payload["loop_forever"] = bool(loop_forever)
 
-    if run_config.output_path is not None:
-        run_config.output_path.parent.mkdir(parents=True, exist_ok=True)
-        run_config.output_path.write_text(rendered + "\n", encoding="utf-8")
+            rendered = json.dumps(payload, indent=2)
+            print(rendered)
+
+            if run_config.output_path is not None:
+                run_config.output_path.parent.mkdir(parents=True, exist_ok=True)
+                run_config.output_path.write_text(rendered + "\n", encoding="utf-8")
+    except KeyboardInterrupt:
+        print("Interrupted; stopping continuous run loop.", file=sys.stderr)
+        return 130
 
     return 0
 

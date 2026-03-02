@@ -8,6 +8,7 @@ def test_run_defaults_to_all_disease_objective() -> None:
     parser = build_parser()
     args = parser.parse_args(["run", "--dry-run"])
     assert args.objective == DEFAULT_OBJECTIVE
+    assert args.max_cycles == 0
 
 
 def test_run_autonomous_defaults_to_all_disease_objective() -> None:
@@ -30,6 +31,8 @@ def test_run_parser_accepts_native_tool_loop_and_session_flags() -> None:
     args = parser.parse_args(
         [
             "run",
+            "--max-cycles",
+            "5",
             "--native-tool-loop",
             "--native-tool-max-rounds",
             "12",
@@ -66,6 +69,7 @@ def test_run_parser_accepts_native_tool_loop_and_session_flags() -> None:
             "1234",
         ]
     )
+    assert args.max_cycles == 5
     assert args.native_tool_loop is True
     assert args.native_tool_max_rounds == 12
     assert args.session_key == "campaign-main"

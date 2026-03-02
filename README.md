@@ -52,6 +52,9 @@ ClawCures run \
 ClawCures run
 ```
 
+`ClawCures run` now loops continuously by default (`--max-cycles 0`) until you stop it.
+To run a single cycle and exit, use `--max-cycles 1`.
+
 By default, `ClawCures run` sets the objective to:
 "Find cures for all diseases by prioritizing the highest-burden conditions and researching the best drug design strategies for each."
 
@@ -87,7 +90,7 @@ ClawCures run \
 |---|---|
 | `ClawCures print-default-prompt` | Print bundled mission prompt |
 | `ClawCures list-tools` | Show available execution tools (`refua-mcp` + web tools) |
-| `ClawCures run ...` | One planner + execution cycle |
+| `ClawCures run ...` | Continuous planner + execution loop (`--max-cycles 0` default) |
 | `ClawCures run-autonomous ...` | Planner/critic multi-round loop |
 | `ClawCures validate-plan ...` | Policy-check a local JSON plan |
 | `ClawCures rank-portfolio ...` | Rank disease programs from JSON input |
@@ -98,6 +101,7 @@ Run one plan + execute cycle:
 
 ```bash
 ClawCures run \
+  --max-cycles 1 \
   --output artifacts/kras_campaign_run.json
 ```
 
@@ -105,6 +109,7 @@ Run with OpenClaw native function calling (no intermediate JSON plan parsing):
 
 ```bash
 ClawCures run \
+  --max-cycles 1 \
   --native-tool-loop \
   --session-key mission-all-disease-v1 \
   --store-responses \
@@ -196,5 +201,6 @@ Primary references:
 - `--native-tool-fail-fast` disables recoverable tool-error feedback and fails immediately on tool exceptions.
 - Mission framing is aspirational; never claim cures without evidence.
 - For local-model reliability, planner output is auto-repaired and canonicalized (`args`/tool aliases) before execution.
+- `ClawCures run` defaults to an infinite loop. Use `--max-cycles 1` for a single cycle.
 - Architecture details: `docs/ARCHITECTURE.md`
 - Research notes: `docs/RESEARCH.md`
