@@ -55,6 +55,8 @@ ClawCures run
 By default, `ClawCures run` sets the objective to:
 "Find cures for all diseases by prioritizing the highest-burden conditions and researching the best drug design strategies for each."
 
+If planner JSON generation fails repeatedly (common on small local models), ClawCures now auto-attempts repair passes and then falls back to a deterministic all-disease bootstrap validation plan.
+
 5. Run a live planning dry-run
 
 ```bash
@@ -160,5 +162,6 @@ Primary references:
 - Tool plans are strict JSON for reproducibility.
 - All tool calls go through a strict allowlist.
 - Mission framing is aspirational; never claim cures without evidence.
+- For local-model reliability, planner output is auto-repaired and canonicalized (`args`/tool aliases) before execution.
 - Architecture details: `docs/ARCHITECTURE.md`
 - Research notes: `docs/RESEARCH.md`

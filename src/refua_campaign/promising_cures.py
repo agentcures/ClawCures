@@ -221,6 +221,13 @@ def _extract_cure_from_result(
     if not has_signal:
         return None
 
+    validated_affinity = (
+        tool == "refua_validate_spec"
+        and bool(flat.get("output.valid"))
+        and str(flat.get("output.execution_plan.action", "")).lower() == "affinity"
+        and bool(smiles)
+    )
+
     explicit_score, _ = _pick_float(
         flat,
         aliases=[
@@ -230,7 +237,11 @@ def _extract_cure_from_result(
         ],
     )
     if explicit_score is None:
-        score = _score_candidate(metrics=metrics, assessment=assessment)
+        score = _score_candidate(
+            metrics=metrics,
+            assessment=assessment,
+            validated_affinity=validated_affinity,
+        )
     else:
         score = round(max(0.0, min(float(explicit_score), 100.0)), 2)
 
@@ -374,9 +385,16 @@ def _slugify(value: str) -> str:
 
 
 def _score_candidate(
-    *, metrics: dict[str, float | None], assessment: str | None
+    *,
+    metrics: dict[str, float | None],
+    assessment: str | None,
+    validated_affinity: bool = False,
 ) -> float:
     score = 0.0
+
+    # Validation-only plans still indicate executable chemistry+target pairing.
+    if validated_affinity:
+        score += 28.0
 
     binding_probability = metrics.get("binding_probability")
     if binding_probability is not None:

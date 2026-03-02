@@ -92,3 +92,27 @@ def test_summarize_promising_cures_counts() -> None:
     assert summary["total_candidates"] == 2
     assert summary["promising_count"] == 1
     assert summary["with_admet_properties"] == 1
+
+
+def test_validate_spec_affinity_seed_scores_as_early_candidate() -> None:
+    results = [
+        {
+            "tool": "refua_validate_spec",
+            "args": {
+                "name": "ihd_aspirin_candidate",
+                "entities": [
+                    {"type": "protein", "id": "target", "sequence": "MTEYKLVVVGAGGVGK"},
+                    {"type": "ligand", "id": "candidate", "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O"},
+                ],
+            },
+            "output": {
+                "valid": True,
+                "execution_plan": {"action": "affinity"},
+            },
+        }
+    ]
+
+    cures = extract_promising_cures(results)
+    assert len(cures) == 1
+    assert cures[0]["score"] > 0
+    assert cures[0]["promising"] is False
