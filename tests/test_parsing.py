@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from refua_campaign.openclaw_client import _extract_response_text
 from refua_campaign.orchestrator import _extract_json_plan
 
@@ -37,9 +39,23 @@ def test_extract_json_plan_reads_nested_plan_key() -> None:
 
 
 def test_extract_json_plan_canonicalizes_tool_alias_when_allowed() -> None:
-    text = '{"calls":[{"tool":"validate_spec","args":{}}]}'
+    text = (
+        '{"calls":[{"tool":"validate_spec","args":{"entities":[{"type":"protein","id":"target","sequence":"MKTAYI"}]}}]}'
+    )
     plan = _extract_json_plan(text, allowed_tools=["refua_validate_spec"])
     assert plan["calls"][0]["tool"] == "refua_validate_spec"
+
+
+def test_extract_json_plan_requires_entities_for_validate_spec_when_allowed() -> None:
+    text = '{"calls":[{"tool":"refua_validate_spec","args":{"deep_validate":false}}]}'
+    with pytest.raises(ValueError, match="must include 'entities'"):
+        _extract_json_plan(text, allowed_tools=["refua_validate_spec"])
+
+
+def test_extract_json_plan_requires_job_id_for_refua_job_when_allowed() -> None:
+    text = '{"calls":[{"tool":"refua_job","args":{"action":"create_program"}}]}'
+    with pytest.raises(ValueError, match="expects a 'job_id'"):
+        _extract_json_plan(text, allowed_tools=["refua_job"])
 
 
 def test_extract_response_text_prefers_output_text() -> None:

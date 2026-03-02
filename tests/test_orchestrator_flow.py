@@ -56,7 +56,10 @@ def test_orchestrator_plan_repairs_invalid_first_response() -> None:
     openclaw = _FakeOpenClawClient(
         responses=[
             "Please clarify your request.",
-            '{"calls":[{"tool":"validate_spec","arguments":{"deep_validate":false}}]}',
+            (
+                '{"calls":[{"tool":"validate_spec","arguments":{"entities":[{"type":"protein",'
+                '"id":"target","sequence":"MKTAYI"}],"deep_validate":false}}]}'
+            ),
         ]
     )
     adapter = _FakeAdapter(["refua_validate_spec"])
@@ -84,6 +87,33 @@ def test_orchestrator_plan_uses_mission_fallback_for_all_disease_objective() -> 
     )
     adapter = _FakeAdapter(["refua_validate_spec"])
     orchestrator = CampaignOrchestrator(openclaw=openclaw, refua_mcp=adapter, max_plan_attempts=2)
+
+    planner_text, plan = orchestrator.plan(
+        objective=(
+            "Find cures for all diseases by prioritizing the highest-burden conditions "
+            "and researching the best drug design strategies for each."
+        ),
+        system_prompt="Return strict JSON plans.",
+    )
+
+    assert "Planner fallback plan was used" in planner_text
+    assert len(plan["calls"]) >= 1
+    assert all(call["tool"] == "refua_validate_spec" for call in plan["calls"])
+
+
+def test_orchestrator_plan_falls_back_when_semantically_invalid_for_mission() -> None:
+    openclaw = _FakeOpenClawClient(
+        responses=[
+            (
+                '{"calls":[{"tool":"refua_validate_spec","args":{"objective":"global cure '
+                'roadmap"}},{"tool":"refua_job","args":{"action":"create_program"}}]}'
+            ),
+        ]
+    )
+    adapter = _FakeAdapter(["refua_validate_spec", "refua_job"])
+    orchestrator = CampaignOrchestrator(
+        openclaw=openclaw, refua_mcp=adapter, max_plan_attempts=1
+    )
 
     planner_text, plan = orchestrator.plan(
         objective=(

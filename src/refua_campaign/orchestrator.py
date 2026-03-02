@@ -206,6 +206,7 @@ def _extract_json_plan(
 
     canonical = _canonicalize_plan_tools(plan, allowed_tools=allowed_tools)
     _validate_plan_tools(canonical, allowed_tools=allowed_tools)
+    _validate_plan_call_shapes(canonical)
     return canonical
 
 
@@ -373,6 +374,41 @@ def _validate_plan_tools(plan: dict[str, Any], *, allowed_tools: list[str]) -> N
             f"Planner used unsupported tool(s): {unsupported_csv}. "
             f"Allowed tools: {allowed_csv}."
         )
+
+
+def _validate_plan_call_shapes(plan: dict[str, Any]) -> None:
+    calls = plan.get("calls")
+    if not isinstance(calls, list):
+        return
+
+    for index, entry in enumerate(calls, start=1):
+        if not isinstance(entry, dict):
+            continue
+        tool = entry.get("tool")
+        if not isinstance(tool, str):
+            continue
+        args = entry.get("args")
+        if not isinstance(args, dict):
+            raise ValueError(f"Planner call #{index} args must be an object.")
+
+        if tool in {"refua_validate_spec", "refua_fold", "refua_affinity"}:
+            if "entities" not in args:
+                raise ValueError(
+                    f"Planner call #{index} for {tool} must include 'entities'."
+                )
+
+        if tool == "refua_job":
+            job_id = args.get("job_id")
+            if not isinstance(job_id, str) or not job_id.strip():
+                if "action" in args:
+                    raise ValueError(
+                        f"Planner call #{index} for refua_job used workflow-style "
+                        "arguments. refua_job expects a 'job_id'."
+                    )
+                raise ValueError(
+                    f"Planner call #{index} for refua_job must include a non-empty "
+                    "'job_id'."
+                )
 
 
 def _build_plan_repair_instructions(allowed_tools: list[str]) -> str:
