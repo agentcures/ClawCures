@@ -54,6 +54,7 @@ ClawCures run
 
 `ClawCures run` now loops continuously by default (`--max-cycles 0`) until you stop it.
 To run a single cycle and exit, use `--max-cycles 1`.
+In loop mode, memory is preserved automatically by reusing a stable session key, enabling OpenClaw response storage, and carrying concise cycle summaries forward into subsequent planning objectives.
 
 By default, `ClawCures run` sets the objective to:
 "Find cures for all diseases by prioritizing the highest-burden conditions and researching the best drug design strategies for each."
@@ -202,5 +203,6 @@ Primary references:
 - Mission framing is aspirational; never claim cures without evidence.
 - For local-model reliability, planner output is auto-repaired and canonicalized (`args`/tool aliases) before execution.
 - `ClawCures run` defaults to an infinite loop. Use `--max-cycles 1` for a single cycle.
+- Loop mode carries forward compact cross-cycle memory (prior findings, failures, and state hints) to reduce repeated work.
 - Architecture details: `docs/ARCHITECTURE.md`
 - Research notes: `docs/RESEARCH.md`

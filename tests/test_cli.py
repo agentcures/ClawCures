@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from refua_campaign.cli import DEFAULT_OBJECTIVE, build_parser
+from refua_campaign.cli import (
+    DEFAULT_OBJECTIVE,
+    _append_cycle_memory_note,
+    _build_state_memory_note,
+    _compose_objective_with_cycle_memory,
+    build_parser,
+)
 from refua_campaign.refua_mcp_adapter import DEFAULT_TOOL_LIST
 
 
@@ -132,3 +138,55 @@ def test_run_autonomous_parser_accepts_session_flags() -> None:
     assert str(args.regulatory_bundle_dir).endswith("artifacts/bundle")
     assert args.agent_model_map_json == '{"critic":"openclaw:critic"}'
     assert len(args.evidence_file) == 1
+
+
+def test_compose_objective_with_cycle_memory_includes_notes() -> None:
+    objective = _compose_objective_with_cycle_memory(
+        base_objective="Find cures",
+        cycle_index=3,
+        memory_notes=["alpha signal", "beta failure"],
+    )
+    assert "Find cures" in objective
+    assert "cycle 3" in objective
+    assert "alpha signal" in objective
+    assert "beta failure" in objective
+
+
+def test_append_cycle_memory_note_deduplicates_and_trims() -> None:
+    notes = ["one", "two"]
+    updated = _append_cycle_memory_note(notes, "two", max_notes=2)
+    assert updated == ["one", "two"]
+    updated = _append_cycle_memory_note(updated, "three", max_notes=2)
+    assert updated == ["two", "three"]
+
+
+def test_build_state_memory_note_includes_registry_and_failures() -> None:
+    note = _build_state_memory_note(
+        {
+            "runs": [
+                {
+                    "plan_calls": 9,
+                    "promising_count": 2,
+                    "interesting_target_count": 5,
+                }
+            ],
+            "failures": [
+                {"error": "timeout"},
+                {"error": "timeout"},
+                {"error": "rate_limit"},
+            ],
+            "program_registry": {
+                "target::x": {"kind": "target", "target": "EGFR", "mentions": 7},
+                "cure::x": {
+                    "kind": "cure_candidate",
+                    "name": "compound-a",
+                    "promising_runs": 2,
+                    "total_runs": 4,
+                },
+            },
+        }
+    )
+    assert "tracked 1 runs" in note
+    assert "timeout (2)" in note
+    assert "EGFR (7)" in note
+    assert "compound-a (2/4)" in note

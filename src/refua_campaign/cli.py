@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from datetime import datetime, timezone
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +18,7 @@ from refua_campaign.autonomy import (
 from refua_campaign.campaign_state import (
     build_failure_intelligence,
     default_campaign_state_path,
+    load_campaign_state,
     persist_campaign_state,
 )
 from refua_campaign.clinical_trials import ClawCuresClinicalController
@@ -41,6 +45,8 @@ DEFAULT_OBJECTIVE = (
     "Find cures for all diseases by prioritizing the highest-burden conditions and "
     "researching the best drug design strategies for each."
 )
+_LOOP_MEMORY_WINDOW_CYCLES = 6
+_LOOP_MEMORY_OBJECTIVE_CHAR_BUDGET = 8_000
 
 
 class _StaticToolAdapter:
@@ -710,6 +716,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         store_responses = True
     else:
         store_responses = store_from_env
+    multi_cycle_mode = effective_max_cycles == 0 or effective_max_cycles > 1
+    if multi_cycle_mode and session_key is None:
+        session_key = _build_loop_session_key()
+    if multi_cycle_mode and store_responses is None:
+        store_responses = True
     agent_model_map = _load_agent_model_map(
         map_file=args.agent_model_map_file,
         map_json=args.agent_model_map_json,
@@ -743,9 +754,22 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     cycle_index = 0
     loop_forever = effective_max_cycles == 0
+    cycle_memory_notes: list[str] = []
+    if multi_cycle_mode:
+        state_snapshot = load_campaign_state(args.state_file or default_campaign_state_path())
+        state_memory = _build_state_memory_note(state_snapshot)
+        if state_memory:
+            cycle_memory_notes.append(state_memory)
     try:
         while loop_forever or cycle_index < effective_max_cycles:
             cycle_index += 1
+            cycle_objective = run_config.objective
+            if multi_cycle_mode:
+                cycle_objective = _compose_objective_with_cycle_memory(
+                    base_objective=run_config.objective,
+                    cycle_index=cycle_index,
+                    memory_notes=cycle_memory_notes,
+                )
             planner_text = ""
             plan_policy_payload: dict[str, Any] | None = None
             if bool(args.native_tool_loop):
@@ -758,7 +782,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 if adapter_error is not None:
                     raise RuntimeError(str(adapter_error))
                 native_run = orchestrator.run_native_tool_loop(
-                    objective=run_config.objective,
+                    objective=cycle_objective,
                     system_prompt=system_prompt,
                     max_rounds=max(1, int(args.native_tool_max_rounds)),
                 )
@@ -774,7 +798,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 results = []
             else:
                 planner_text, plan = orchestrator.plan(
-                    objective=run_config.objective,
+                    objective=cycle_objective,
                     system_prompt=system_prompt,
                 )
                 results = []
@@ -902,14 +926,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 }
                 if plan_policy_payload is not None:
                     payload["plan_policy"] = plan_policy_payload
-                if session_key is not None:
-                    payload["session_key"] = session_key
-                if store_responses is not None:
-                    payload["store_responses"] = bool(store_responses)
                 if agent_model_map:
                     payload["agent_model_map"] = agent_model_map
                 if evidence_items:
                     payload["evidence_item_count"] = len(evidence_items)
+
+            if session_key is not None:
+                payload["session_key"] = session_key
+            if store_responses is not None:
+                payload["store_responses"] = bool(store_responses)
+            if multi_cycle_mode:
+                payload["cycle_memory_enabled"] = True
+                payload["cycle_objective_augmented"] = (
+                    cycle_objective != run_config.objective
+                )
+                payload["memory_notes_used"] = len(cycle_memory_notes)
 
             if not bool(run_config.dry_run) and not bool(args.disable_state_update):
                 state_file = args.state_file or default_campaign_state_path()
@@ -952,6 +983,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     payload.setdefault("warnings", []).append(
                         f"Regulatory bundle generation failed: {exc}"
                     )
+
+            if multi_cycle_mode:
+                cycle_memory_note = _build_cycle_memory_note(
+                    payload=payload,
+                    cycle_index=cycle_index,
+                )
+                if cycle_memory_note:
+                    payload["cycle_memory_note"] = cycle_memory_note
+                    cycle_memory_notes = _append_cycle_memory_note(
+                        cycle_memory_notes,
+                        cycle_memory_note,
+                        max_notes=_LOOP_MEMORY_WINDOW_CYCLES,
+                    )
+                payload["memory_notes_stored"] = len(cycle_memory_notes)
 
             payload["cycle_index"] = cycle_index
             payload["max_cycles"] = int(effective_max_cycles)
@@ -1195,6 +1240,210 @@ def _cmd_validate_plan(args: argparse.Namespace) -> int:
         payload.setdefault("warnings", []).append(str(adapter_error))
     print(json.dumps(payload, indent=2))
     return 0
+
+
+def _build_loop_session_key() -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%SZ")
+    return f"clawcures-loop-{stamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _build_state_memory_note(state: dict[str, Any]) -> str:
+    if not isinstance(state, dict):
+        return ""
+
+    lines: list[str] = []
+    runs_raw = state.get("runs")
+    runs = [item for item in runs_raw if isinstance(item, dict)] if isinstance(runs_raw, list) else []
+    if runs:
+        recent = runs[-1]
+        lines.append(
+            "Historical state: tracked "
+            f"{len(runs)} runs; most recent had "
+            f"{_as_int(recent.get('plan_calls'))} planned calls, "
+            f"{_as_int(recent.get('promising_count'))} promising candidates, and "
+            f"{_as_int(recent.get('interesting_target_count'))} interesting targets."
+        )
+
+    failures_raw = state.get("failures")
+    failures = [item for item in failures_raw if isinstance(item, dict)] if isinstance(failures_raw, list) else []
+    if failures:
+        reason_counts = Counter(
+            str(item.get("error") or "unknown_error")
+            for item in failures[-200:]
+        )
+        top_reasons = ", ".join(
+            f"{reason} ({count})"
+            for reason, count in reason_counts.most_common(3)
+        )
+        if top_reasons:
+            lines.append(f"Common prior tool failures: {top_reasons}.")
+
+    registry = state.get("program_registry")
+    if isinstance(registry, dict) and registry:
+        target_rows: list[tuple[int, str]] = []
+        cure_rows: list[tuple[int, int, str]] = []
+        for entry in registry.values():
+            if not isinstance(entry, dict):
+                continue
+            kind = str(entry.get("kind") or "").strip().lower()
+            if kind == "target":
+                target = str(entry.get("target") or "").strip()
+                if target:
+                    target_rows.append((_as_int(entry.get("mentions")), target))
+            elif kind == "cure_candidate":
+                name = str(entry.get("name") or entry.get("cure_id") or "").strip()
+                if name:
+                    cure_rows.append(
+                        (
+                            _as_int(entry.get("promising_runs")),
+                            _as_int(entry.get("total_runs")),
+                            name,
+                        )
+                    )
+
+        if target_rows:
+            target_rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            top_targets = ", ".join(
+                f"{name} ({mentions})"
+                for mentions, name in target_rows[:5]
+            )
+            lines.append(f"Top retained targets: {top_targets}.")
+        if cure_rows:
+            cure_rows.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            top_cures = ", ".join(
+                f"{name} ({promising}/{total})"
+                for promising, total, name in cure_rows[:5]
+            )
+            lines.append(
+                "Most repeated candidates (promising/total runs): "
+                f"{top_cures}."
+            )
+
+    note = " ".join(lines).strip()
+    return note[:1200]
+
+
+def _compose_objective_with_cycle_memory(
+    *,
+    base_objective: str,
+    cycle_index: int,
+    memory_notes: list[str],
+) -> str:
+    trimmed_notes = [
+        note.strip()
+        for note in memory_notes[-_LOOP_MEMORY_WINDOW_CYCLES :]
+        if str(note).strip()
+    ]
+    if not trimmed_notes:
+        return base_objective
+
+    guidance = (
+        "Use this memory to avoid repeating completed steps, carry forward validated "
+        "signals, and prioritize unresolved evidence gaps."
+    )
+
+    def _render(notes: list[str]) -> str:
+        note_block = "\n".join(f"- {note}" for note in notes)
+        return (
+            f"{base_objective}\n\n"
+            f"Cross-cycle memory for cycle {cycle_index}:\n"
+            f"{note_block}\n\n"
+            f"{guidance}"
+        )
+
+    rendered = _render(trimmed_notes)
+    while (
+        len(rendered) > _LOOP_MEMORY_OBJECTIVE_CHAR_BUDGET
+        and len(trimmed_notes) > 1
+    ):
+        trimmed_notes = trimmed_notes[1:]
+        rendered = _render(trimmed_notes)
+
+    return rendered[:_LOOP_MEMORY_OBJECTIVE_CHAR_BUDGET]
+
+
+def _build_cycle_memory_note(*, payload: dict[str, Any], cycle_index: int) -> str:
+    parts: list[str] = [f"cycle {cycle_index}"]
+
+    plan = payload.get("plan")
+    if isinstance(plan, dict):
+        calls = plan.get("calls")
+        if isinstance(calls, list):
+            parts.append(f"plan_calls={len(calls)}")
+
+    if bool(payload.get("dry_run")):
+        parts.append("dry_run")
+    else:
+        results = payload.get("results")
+        if isinstance(results, list):
+            parts.append(f"results={len(results)}")
+
+    promising_summary = payload.get("promising_cures_summary")
+    if isinstance(promising_summary, dict):
+        parts.append(
+            "promising="
+            f"{_as_int(promising_summary.get('promising_count'))}/"
+            f"{_as_int(promising_summary.get('total_candidates'))}"
+        )
+
+    target_summary = payload.get("interesting_targets_summary")
+    if isinstance(target_summary, dict):
+        total_targets = _as_int(target_summary.get("total_targets"))
+        top_targets_raw = target_summary.get("top_targets")
+        top_targets = (
+            [str(item).strip() for item in top_targets_raw if str(item).strip()]
+            if isinstance(top_targets_raw, list)
+            else []
+        )
+        if top_targets:
+            parts.append(
+                f"targets={total_targets} top={','.join(top_targets[:3])}"
+            )
+        else:
+            parts.append(f"targets={total_targets}")
+
+    failures = payload.get("failure_intelligence")
+    if isinstance(failures, dict):
+        failed_calls = _as_int(failures.get("failed_tool_calls"))
+        if failed_calls > 0:
+            parts.append(f"failed_tool_calls={failed_calls}")
+
+    planner_text = str(payload.get("planner_response_text") or "")
+    if "Planner fallback plan was used" in planner_text:
+        parts.append("planner_fallback_used")
+
+    warnings_raw = payload.get("warnings")
+    warnings = (
+        [str(item).strip() for item in warnings_raw if str(item).strip()]
+        if isinstance(warnings_raw, list)
+        else []
+    )
+    if warnings:
+        parts.append(f"warning={warnings[0][:80]}")
+
+    return "; ".join(parts)[:900]
+
+
+def _append_cycle_memory_note(
+    memory_notes: list[str],
+    note: str,
+    *,
+    max_notes: int,
+) -> list[str]:
+    clean_note = note.strip()
+    if not clean_note:
+        return memory_notes[-max(1, int(max_notes)) :]
+    if memory_notes and memory_notes[-1] == clean_note:
+        return memory_notes[-max(1, int(max_notes)) :]
+    updated = [*memory_notes, clean_note]
+    return updated[-max(1, int(max_notes)) :]
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _parse_optional_bool_env(name: str) -> bool | None:
