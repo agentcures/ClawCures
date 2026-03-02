@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ClawCures"
-version = "0.7.0"
+version = "0.7.1"
 description = "Campaign orchestration layer built on OpenClaw planning and refua-mcp execution."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -32,8 +32,8 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
-  "refua-mcp>=0.6.0",
-  "refua-clinical>=0.7.0",
+  "refua-mcp>=0.7.1",
+  "refua-clinical>=0.7.1",
 ]
 
 [project.urls]
