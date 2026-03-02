@@ -101,6 +101,29 @@ def test_orchestrator_plan_uses_mission_fallback_for_all_disease_objective() -> 
     assert all(call["tool"] == "refua_validate_spec" for call in plan["calls"])
 
 
+def test_orchestrator_plan_fallback_adds_web_search_when_available() -> None:
+    openclaw = _FakeOpenClawClient(
+        responses=[
+            "I need more context first.",
+            "Still need context before producing a tool plan.",
+        ]
+    )
+    adapter = _FakeAdapter(["refua_validate_spec", "web_search"])
+    orchestrator = CampaignOrchestrator(openclaw=openclaw, refua_mcp=adapter, max_plan_attempts=2)
+
+    _planner_text, plan = orchestrator.plan(
+        objective=(
+            "Find cures for all diseases by prioritizing the highest-burden conditions "
+            "and researching the best drug design strategies for each."
+        ),
+        system_prompt="Return strict JSON plans.",
+    )
+
+    tools = [call["tool"] for call in plan["calls"]]
+    assert "web_search" in tools
+    assert "refua_validate_spec" in tools
+
+
 def test_orchestrator_plan_falls_back_when_semantically_invalid_for_mission() -> None:
     openclaw = _FakeOpenClawClient(
         responses=[

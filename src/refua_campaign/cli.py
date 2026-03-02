@@ -21,6 +21,10 @@ from refua_campaign.promising_cures import (
 )
 from refua_campaign.prompts import load_system_prompt
 from refua_campaign.refua_mcp_adapter import DEFAULT_TOOL_LIST, RefuaMcpAdapter
+from refua_campaign.target_discovery import (
+    extract_interesting_targets,
+    summarize_interesting_targets,
+)
 
 DEFAULT_OBJECTIVE = (
     "Find cures for all diseases by prioritizing the highest-burden conditions and "
@@ -141,7 +145,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prompt_parser.set_defaults(handler=_cmd_print_default_prompt)
 
-    tools_parser = sub.add_parser("list-tools", help="List supported refua-mcp tools.")
+    tools_parser = sub.add_parser(
+        "list-tools",
+        help="List supported execution tools (refua-mcp + web tools).",
+    )
     tools_parser.set_defaults(handler=_cmd_list_tools)
 
     validate_parser = sub.add_parser(
@@ -413,6 +420,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             for item in results
         ]
         promising_cures = extract_promising_cures(serialized_results)
+        interesting_targets = extract_interesting_targets(serialized_results)
         payload = {
             "objective": run_config.objective,
             "system_prompt": system_prompt,
@@ -421,6 +429,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "results": serialized_results,
             "promising_cures": promising_cures,
             "promising_cures_summary": summarize_promising_cures(promising_cures),
+            "interesting_targets": interesting_targets,
+            "interesting_targets_summary": summarize_interesting_targets(
+                interesting_targets
+            ),
             "dry_run": False,
         }
 
@@ -506,9 +518,14 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
             for item in results
         ]
         promising_cures = extract_promising_cures(serialized_results)
+        interesting_targets = extract_interesting_targets(serialized_results)
         payload["results"] = serialized_results
         payload["promising_cures"] = promising_cures
         payload["promising_cures_summary"] = summarize_promising_cures(promising_cures)
+        payload["interesting_targets"] = interesting_targets
+        payload["interesting_targets_summary"] = summarize_interesting_targets(
+            interesting_targets
+        )
     elif not bool(payload.get("approved")):
         payload.setdefault("warnings", []).append(
             "Autonomous loop finished without an approved plan."

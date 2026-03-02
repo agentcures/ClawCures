@@ -21,3 +21,5 @@ def test_default_tool_list_includes_protein_properties() -> None:
     assert "refua_clinical_simulator" in DEFAULT_TOOL_LIST
     assert "refua_data_list" in DEFAULT_TOOL_LIST
     assert "refua_data_query" in DEFAULT_TOOL_LIST
+    assert "web_search" in DEFAULT_TOOL_LIST
+    assert "web_fetch" in DEFAULT_TOOL_LIST

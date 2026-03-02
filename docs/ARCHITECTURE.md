@@ -15,6 +15,7 @@
 
 - `refua_campaign.refua_mcp_adapter.RefuaMcpAdapter`
   - Executes typed `refua-mcp` calls through `refua_mcp.server`.
+  - Exposes built-in `web_search` and `web_fetch` tools for evidence gathering.
   - Enforces an allowlist of tools.
 
 - `refua_campaign.orchestrator.CampaignOrchestrator`
@@ -30,6 +31,10 @@
 - `refua_campaign.portfolio`
   - Ranks disease programs by weighted factors.
   - Supports portfolio-level prioritization before expensive model execution.
+
+- `refua_campaign.target_discovery`
+  - Extracts and ranks web-derived therapeutic target hypotheses from `web_search`/`web_fetch` outputs.
+  - Produces `interesting_targets` evidence summaries for disease-target scouting.
 
 - `refua_campaign.cli`
   - `run` for planning/execution.

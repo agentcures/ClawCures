@@ -58,6 +58,24 @@ def test_extract_json_plan_requires_job_id_for_refua_job_when_allowed() -> None:
         _extract_json_plan(text, allowed_tools=["refua_job"])
 
 
+def test_extract_json_plan_requires_query_for_web_search_when_allowed() -> None:
+    text = '{"calls":[{"tool":"web_search","args":{"count":3}}]}'
+    with pytest.raises(ValueError, match="must include a non-empty 'query'"):
+        _extract_json_plan(text, allowed_tools=["web_search"])
+
+
+def test_extract_json_plan_requires_url_for_web_fetch_when_allowed() -> None:
+    text = '{"calls":[{"tool":"web_fetch","args":{"extract_mode":"markdown"}}]}'
+    with pytest.raises(ValueError, match="must include a non-empty 'url'"):
+        _extract_json_plan(text, allowed_tools=["web_fetch"])
+
+
+def test_extract_json_plan_canonicalizes_websearch_alias_when_allowed() -> None:
+    text = '{"calls":[{"tool":"websearch","args":{"query":"EGFR target biology"}}]}'
+    plan = _extract_json_plan(text, allowed_tools=["web_search"])
+    assert plan["calls"][0]["tool"] == "web_search"
+
+
 def test_extract_response_text_prefers_output_text() -> None:
     payload = {"output_text": "hello world"}
     assert _extract_response_text(payload) == "hello world"

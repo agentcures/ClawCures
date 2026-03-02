@@ -23,7 +23,53 @@ _TOOL_ALIAS_MAP: dict[str, str] = {
     "refua_protein_property": "refua_protein_properties",
     "clinical_simulator": "refua_clinical_simulator",
     "jobs": "refua_job",
+    "websearch": "web_search",
+    "webfetch": "web_fetch",
 }
+_MISSION_TARGET_DISCOVERY_QUERIES: tuple[dict[str, str], ...] = (
+    {
+        "disease_slug": "ischemic_heart_disease",
+        "query": (
+            "ischemic heart disease validated therapeutic targets "
+            "PCSK9 LPA IL1B NLRP3 review"
+        ),
+    },
+    {
+        "disease_slug": "lung_cancer",
+        "query": (
+            "lung cancer actionable therapeutic targets "
+            "EGFR ALK KRAS MET review"
+        ),
+    },
+    {
+        "disease_slug": "alzheimers_disease",
+        "query": (
+            "alzheimer disease therapeutic targets "
+            "APP MAPT TREM2 APOE review"
+        ),
+    },
+    {
+        "disease_slug": "type_2_diabetes",
+        "query": (
+            "type 2 diabetes therapeutic targets "
+            "GLP1R SGLT2 PPARG GIPR review"
+        ),
+    },
+    {
+        "disease_slug": "tuberculosis",
+        "query": (
+            "tuberculosis validated drug targets "
+            "InhA DprE1 ATP synthase review"
+        ),
+    },
+    {
+        "disease_slug": "hiv",
+        "query": (
+            "HIV cure and functional cure targets "
+            "CCR5 integrase reverse transcriptase review"
+        ),
+    },
+)
 _MISSION_BOOTSTRAP_PROGRAMS: tuple[dict[str, str], ...] = (
     {
         "disease_slug": "ischemic_heart_disease",
@@ -410,6 +456,29 @@ def _validate_plan_call_shapes(plan: dict[str, Any]) -> None:
                     "'job_id'."
                 )
 
+        if tool == "web_search":
+            query = args.get("query")
+            if not isinstance(query, str) or not query.strip():
+                query = args.get("q")
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError(
+                    f"Planner call #{index} for web_search must include a non-empty "
+                    "'query'."
+                )
+            count = args.get("count")
+            if count is not None and not isinstance(count, int):
+                raise ValueError(
+                    f"Planner call #{index} for web_search count must be an integer."
+                )
+
+        if tool == "web_fetch":
+            url = args.get("url")
+            if not isinstance(url, str) or not url.strip():
+                raise ValueError(
+                    f"Planner call #{index} for web_fetch must include a non-empty "
+                    "'url'."
+                )
+
 
 def _build_plan_repair_instructions(allowed_tools: list[str]) -> str:
     tools = ", ".join(sorted(allowed_tools))
@@ -449,11 +518,28 @@ def _build_default_objective_fallback_plan(
 ) -> dict[str, Any] | None:
     if not _is_all_disease_objective(objective):
         return None
-    if "refua_validate_spec" not in set(allowed_tools):
-        return {"calls": []}
-
+    allowed_set = set(allowed_tools)
     calls: list[dict[str, Any]] = []
-    for item in _MISSION_BOOTSTRAP_PROGRAMS:
+
+    if "web_search" in allowed_set:
+        for item in _MISSION_TARGET_DISCOVERY_QUERIES:
+            calls.append(
+                {
+                    "tool": "web_search",
+                    "args": {
+                        "query": item["query"],
+                        "count": 5,
+                    },
+                }
+            )
+
+    if "refua_validate_spec" not in allowed_set:
+        return {"calls": calls}
+
+    max_validation_calls = (
+        4 if "web_search" in allowed_set else len(_MISSION_BOOTSTRAP_PROGRAMS)
+    )
+    for item in _MISSION_BOOTSTRAP_PROGRAMS[:max_validation_calls]:
         disease_slug = item["disease_slug"]
         candidate_slug = item["candidate_slug"]
         calls.append(

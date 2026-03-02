@@ -2,7 +2,7 @@
 
 Disease-campaign orchestration that separates planning from execution:
 - OpenClaw plans through `/v1/responses`.
-- `refua-mcp` executes typed scientific tools.
+- `refua-mcp` executes typed scientific tools, with built-in `web_search`/`web_fetch` for evidence collection.
 
 ## What You Get
 
@@ -56,6 +56,7 @@ By default, `ClawCures run` sets the objective to:
 "Find cures for all diseases by prioritizing the highest-burden conditions and researching the best drug design strategies for each."
 
 If planner JSON generation fails repeatedly (common on small local models), ClawCures now auto-attempts repair passes and then falls back to a deterministic all-disease bootstrap validation plan.
+For all-disease objectives, this fallback now includes deterministic `web_search` target-discovery queries before validation calls.
 
 5. Run a live planning dry-run
 
@@ -74,13 +75,15 @@ ClawCures run \
 | `REFUA_CAMPAIGN_OPENCLAW_TOKEN` | unset | Bearer token override |
 | `OPENCLAW_GATEWAY_TOKEN` | unset | Gateway token fallback |
 | `OPENCLAW_GATEWAY_PASSWORD` | unset | Password-mode fallback token |
+| `BRAVE_API_KEY` | unset | Optional key for higher-quality `web_search` results |
+| `CLAWCURES_ALLOW_PRIVATE_WEB_FETCH` | unset | Set `true` to allow `web_fetch` against localhost/private IPs |
 
 ## CLI Commands
 
 | Command | What it does |
 |---|---|
 | `ClawCures print-default-prompt` | Print bundled mission prompt |
-| `ClawCures list-tools` | Show available `refua-mcp` tools |
+| `ClawCures list-tools` | Show available execution tools (`refua-mcp` + web tools) |
 | `ClawCures run ...` | One planner + execution cycle |
 | `ClawCures run-autonomous ...` | Planner/critic multi-round loop |
 | `ClawCures validate-plan ...` | Policy-check a local JSON plan |
@@ -98,6 +101,8 @@ ClawCures run \
 The run JSON now includes:
 - `promising_cures`: ranked therapeutic candidates extracted from tool outputs
 - `promising_cures_summary`: aggregate counts and ADMET coverage
+- `interesting_targets`: web-derived disease target hypotheses ranked by evidence density
+- `interesting_targets_summary`: aggregate counts and top target list
 
 Each cure includes:
 - `metrics` (binding/admet/affinity/potency signals)
@@ -161,6 +166,8 @@ Primary references:
 
 - Tool plans are strict JSON for reproducibility.
 - All tool calls go through a strict allowlist.
+- `web_search` and `web_fetch` are included in the allowlist for target/evidence discovery.
+- `web_fetch` blocks localhost/private-network targets by default for safety.
 - Mission framing is aspirational; never claim cures without evidence.
 - For local-model reliability, planner output is auto-repaired and canonicalized (`args`/tool aliases) before execution.
 - Architecture details: `docs/ARCHITECTURE.md`
