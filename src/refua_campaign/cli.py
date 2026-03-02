@@ -12,8 +12,14 @@ from refua_campaign.autonomy import (
     PlanPolicy,
     evaluate_plan_policy,
 )
+from refua_campaign.campaign_state import (
+    build_failure_intelligence,
+    default_campaign_state_path,
+    persist_campaign_state,
+)
 from refua_campaign.clinical_trials import ClawCuresClinicalController
 from refua_campaign.config import CampaignRunConfig, OpenClawConfig
+from refua_campaign.evidence_quality import summarize_evidence_quality
 from refua_campaign.openclaw_client import OpenClawClient
 from refua_campaign.orchestrator import CampaignOrchestrator
 from refua_campaign.portfolio import PortfolioWeights, rank_disease_programs
@@ -22,11 +28,13 @@ from refua_campaign.promising_cures import (
     summarize_promising_cures,
 )
 from refua_campaign.prompts import load_system_prompt
+from refua_campaign.regulatory_bridge import build_regulatory_bundle
 from refua_campaign.refua_mcp_adapter import DEFAULT_TOOL_LIST, RefuaMcpAdapter
 from refua_campaign.target_discovery import (
     extract_interesting_targets,
     summarize_interesting_targets,
 )
+from refua_campaign.translational_handoff import build_translational_handoff
 from refua_campaign.web_evidence import expand_results_with_web_fetch
 
 DEFAULT_OBJECTIVE = (
@@ -144,6 +152,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_parser.add_argument(
+        "--disable-native-parallel-tool-calls",
+        action="store_true",
+        help=(
+            "Disable OpenClaw parallel tool-call planning/execution in native loop mode."
+        ),
+    )
+    run_parser.add_argument(
+        "--native-tool-max-workers",
+        type=int,
+        default=4,
+        help=(
+            "Maximum worker threads when executing parallel-safe native tool calls."
+        ),
+    )
+    run_parser.add_argument(
         "--auto-web-fetch",
         action="store_true",
         help=(
@@ -193,6 +216,48 @@ def build_parser() -> argparse.ArgumentParser:
         default=20000,
         help="Max characters to ingest per evidence file.",
     )
+    run_parser.add_argument(
+        "--policy-max-calls",
+        type=int,
+        default=24,
+        help="Max call budget for optional run-policy checks.",
+    )
+    run_parser.add_argument(
+        "--enforce-stage-policy",
+        action="store_true",
+        help="Enforce staged pipeline ordering checks on generated plans.",
+    )
+    run_parser.add_argument(
+        "--require-evidence-before-hypothesis",
+        action="store_true",
+        help="Require evidence-gathering calls before design/admet/clinical calls.",
+    )
+    run_parser.add_argument(
+        "--strict-plan-policy",
+        action="store_true",
+        help="Fail immediately when run-policy checks return errors.",
+    )
+    run_parser.add_argument(
+        "--state-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional campaign state JSON path for persistent memory/failure tracking."
+        ),
+    )
+    run_parser.add_argument(
+        "--disable-state-update",
+        action="store_true",
+        help="Disable persistent campaign state updates for this run.",
+    )
+    run_parser.add_argument(
+        "--regulatory-bundle-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional output directory to generate a refua-regulatory evidence bundle."
+        ),
+    )
     run_parser.set_defaults(handler=_cmd_run)
 
     loop_parser = sub.add_parser(
@@ -229,6 +294,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-skip-validate-first",
         action="store_true",
         help="Disable policy warning that first call should be refua_validate_spec.",
+    )
+    loop_parser.add_argument(
+        "--enforce-stage-policy",
+        action="store_true",
+        help="Enforce staged pipeline ordering checks in autonomous policy.",
+    )
+    loop_parser.add_argument(
+        "--require-evidence-before-hypothesis",
+        action="store_true",
+        help="Require evidence-gathering calls before design/admet/clinical calls.",
     )
     loop_parser.add_argument(
         "--dry-run",
@@ -318,6 +393,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=20000,
         help="Max characters to ingest per evidence file.",
     )
+    loop_parser.add_argument(
+        "--state-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional campaign state JSON path for persistent memory/failure tracking."
+        ),
+    )
+    loop_parser.add_argument(
+        "--disable-state-update",
+        action="store_true",
+        help="Disable persistent campaign state updates for this run.",
+    )
+    loop_parser.add_argument(
+        "--regulatory-bundle-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional output directory to generate a refua-regulatory evidence bundle."
+        ),
+    )
     loop_parser.set_defaults(handler=_cmd_run_autonomous)
 
     prompt_parser = sub.add_parser(
@@ -353,6 +449,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable warning that first tool should be refua_validate_spec.",
     )
+    validate_parser.add_argument(
+        "--enforce-stage-policy",
+        action="store_true",
+        help="Enforce staged pipeline ordering checks.",
+    )
+    validate_parser.add_argument(
+        "--require-evidence-before-hypothesis",
+        action="store_true",
+        help="Require evidence-gathering calls before design/admet/clinical calls.",
+    )
     validate_parser.set_defaults(handler=_cmd_validate_plan)
 
     portfolio_parser = sub.add_parser(
@@ -378,6 +484,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--w-translational-readiness", type=float, default=0.10
     )
     portfolio_parser.add_argument("--w-novelty", type=float, default=0.10)
+    portfolio_parser.add_argument(
+        "--total-budget",
+        type=float,
+        default=None,
+        help="Optional total budget to allocate across ranked programs.",
+    )
+    portfolio_parser.add_argument(
+        "--voi-weight",
+        type=float,
+        default=0.15,
+        help="Weight multiplier for value-of-information signal when present.",
+    )
     portfolio_parser.set_defaults(handler=_cmd_rank_portfolio)
 
     trial_list_parser = sub.add_parser(
@@ -597,12 +715,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
             0, int(args.native_discovery_bootstrap_rounds)
         ),
         native_tool_fail_fast=bool(args.native_tool_fail_fast),
+        native_parallel_tool_calls=not bool(args.disable_native_parallel_tool_calls),
+        native_tool_max_workers=max(1, int(args.native_tool_max_workers)),
         auto_web_fetch=bool(args.auto_web_fetch),
         auto_web_fetch_max_urls=max(0, int(args.auto_web_fetch_max_urls)),
         auto_web_fetch_max_chars=max(1, int(args.auto_web_fetch_max_chars)),
     )
 
     planner_text = ""
+    plan_policy_payload: dict[str, Any] | None = None
     if bool(args.native_tool_loop):
         if args.plan_file is not None:
             raise ValueError("--native-tool-loop cannot be used with --plan-file.")
@@ -632,6 +753,45 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
         results = []
 
+    apply_policy = (
+        bool(args.enforce_stage_policy)
+        or bool(args.require_evidence_before_hypothesis)
+        or bool(args.strict_plan_policy)
+    )
+    if apply_policy and not bool(args.native_tool_loop):
+        plan_policy = PlanPolicy(
+            max_calls=max(1, int(args.policy_max_calls)),
+            require_validate_first=True,
+            enforce_stage_progression=bool(args.enforce_stage_policy),
+            require_evidence_before_hypothesis=bool(
+                args.require_evidence_before_hypothesis
+            ),
+        )
+        check = evaluate_plan_policy(
+            plan,
+            allowed_tools=adapter.available_tools(),
+            policy=plan_policy,
+        )
+        plan_policy_payload = {
+            "approved": bool(check.approved),
+            "errors": list(check.errors),
+            "warnings": list(check.warnings),
+            "config": {
+                "max_calls": int(plan_policy.max_calls),
+                "require_validate_first": bool(plan_policy.require_validate_first),
+                "enforce_stage_progression": bool(
+                    plan_policy.enforce_stage_progression
+                ),
+                "require_evidence_before_hypothesis": bool(
+                    plan_policy.require_evidence_before_hypothesis
+                ),
+            },
+        }
+        if bool(args.strict_plan_policy) and not check.approved:
+            raise ValueError(
+                "Run plan failed strict policy checks: " + "; ".join(check.errors)
+            )
+
     if run_config.dry_run:
         payload = {
             "objective": run_config.objective,
@@ -647,6 +807,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
             payload["evidence_item_count"] = len(evidence_items)
         payload["stream"] = bool(args.stream)
         payload["auto_web_fetch"] = bool(args.auto_web_fetch)
+        payload["native_parallel_tool_calls"] = not bool(
+            args.disable_native_parallel_tool_calls
+        )
+        payload["native_tool_max_workers"] = max(1, int(args.native_tool_max_workers))
+        if plan_policy_payload is not None:
+            payload["plan_policy"] = plan_policy_payload
         if adapter_error is not None:
             payload["warnings"] = [str(adapter_error)]
     else:
@@ -664,6 +830,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
         ]
         promising_cures = extract_promising_cures(serialized_results)
         interesting_targets = extract_interesting_targets(serialized_results)
+        evidence_quality = summarize_evidence_quality(
+            results=serialized_results,
+            interesting_targets=interesting_targets,
+            promising_cures=promising_cures,
+        )
+        failure_intelligence = build_failure_intelligence(
+            results=serialized_results,
+            promising_cures=promising_cures,
+        )
+        translational_handoff = build_translational_handoff(
+            objective=run_config.objective,
+            interesting_targets=interesting_targets,
+            promising_cures=promising_cures,
+            evidence_quality=evidence_quality,
+        )
         payload = {
             "objective": run_config.objective,
             "system_prompt": system_prompt,
@@ -676,11 +857,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "interesting_targets_summary": summarize_interesting_targets(
                 interesting_targets
             ),
+            "evidence_quality_summary": evidence_quality,
+            "failure_intelligence": failure_intelligence,
+            "translational_handoff": translational_handoff,
             "dry_run": False,
             "native_tool_loop": bool(args.native_tool_loop),
             "stream": bool(args.stream),
             "auto_web_fetch": bool(args.auto_web_fetch),
+            "native_parallel_tool_calls": not bool(
+                args.disable_native_parallel_tool_calls
+            ),
+            "native_tool_max_workers": max(1, int(args.native_tool_max_workers)),
         }
+        if plan_policy_payload is not None:
+            payload["plan_policy"] = plan_policy_payload
         if session_key is not None:
             payload["session_key"] = session_key
         if store_responses is not None:
@@ -689,6 +879,48 @@ def _cmd_run(args: argparse.Namespace) -> int:
             payload["agent_model_map"] = agent_model_map
         if evidence_items:
             payload["evidence_item_count"] = len(evidence_items)
+
+    if not bool(run_config.dry_run) and not bool(args.disable_state_update):
+        state_file = args.state_file or default_campaign_state_path()
+        try:
+            payload["campaign_state"] = persist_campaign_state(
+                objective=run_config.objective,
+                plan=plan,
+                results=[
+                    item
+                    for item in payload.get("results", [])
+                    if isinstance(item, dict)
+                ],
+                promising_cures=[
+                    item
+                    for item in payload.get("promising_cures", [])
+                    if isinstance(item, dict)
+                ],
+                interesting_targets=[
+                    item
+                    for item in payload.get("interesting_targets", [])
+                    if isinstance(item, dict)
+                ],
+                session_key=session_key,
+                state_path=state_file,
+            )
+        except Exception as exc:  # noqa: BLE001
+            payload.setdefault("warnings", []).append(
+                f"Campaign state update failed: {exc}"
+            )
+
+    if not bool(run_config.dry_run) and args.regulatory_bundle_dir is not None:
+        try:
+            payload["regulatory_bundle"] = build_regulatory_bundle(
+                payload=payload,
+                bundle_dir=args.regulatory_bundle_dir,
+                campaign_run_path=None,
+                overwrite=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            payload.setdefault("warnings", []).append(
+                f"Regulatory bundle generation failed: {exc}"
+            )
 
     rendered = json.dumps(payload, indent=2)
     print(rendered)
@@ -720,6 +952,10 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
     policy = PlanPolicy(
         max_calls=max(1, int(args.max_calls)),
         require_validate_first=not bool(args.allow_skip_validate_first),
+        enforce_stage_progression=bool(args.enforce_stage_policy),
+        require_evidence_before_hypothesis=bool(
+            args.require_evidence_before_hypothesis
+        ),
     )
 
     if args.plan_file is not None:
@@ -810,6 +1046,21 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
         ]
         promising_cures = extract_promising_cures(serialized_results)
         interesting_targets = extract_interesting_targets(serialized_results)
+        evidence_quality = summarize_evidence_quality(
+            results=serialized_results,
+            interesting_targets=interesting_targets,
+            promising_cures=promising_cures,
+        )
+        failure_intelligence = build_failure_intelligence(
+            results=serialized_results,
+            promising_cures=promising_cures,
+        )
+        translational_handoff = build_translational_handoff(
+            objective=str(args.objective),
+            interesting_targets=interesting_targets,
+            promising_cures=promising_cures,
+            evidence_quality=evidence_quality,
+        )
         payload["results"] = serialized_results
         payload["promising_cures"] = promising_cures
         payload["promising_cures_summary"] = summarize_promising_cures(promising_cures)
@@ -817,10 +1068,58 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
         payload["interesting_targets_summary"] = summarize_interesting_targets(
             interesting_targets
         )
+        payload["evidence_quality_summary"] = evidence_quality
+        payload["failure_intelligence"] = failure_intelligence
+        payload["translational_handoff"] = translational_handoff
     elif not bool(payload.get("approved")):
         payload.setdefault("warnings", []).append(
             "Autonomous loop finished without an approved plan."
         )
+
+    if bool(payload.get("approved")) and not bool(args.dry_run) and not bool(
+        args.disable_state_update
+    ):
+        state_file = args.state_file or default_campaign_state_path()
+        final_plan_payload = payload.get("final_plan")
+        try:
+            payload["campaign_state"] = persist_campaign_state(
+                objective=str(args.objective),
+                plan=final_plan_payload if isinstance(final_plan_payload, dict) else {},
+                results=[
+                    item
+                    for item in payload.get("results", [])
+                    if isinstance(item, dict)
+                ],
+                promising_cures=[
+                    item
+                    for item in payload.get("promising_cures", [])
+                    if isinstance(item, dict)
+                ],
+                interesting_targets=[
+                    item
+                    for item in payload.get("interesting_targets", [])
+                    if isinstance(item, dict)
+                ],
+                session_key=session_key,
+                state_path=state_file,
+            )
+        except Exception as exc:  # noqa: BLE001
+            payload.setdefault("warnings", []).append(
+                f"Campaign state update failed: {exc}"
+            )
+
+    if bool(payload.get("approved")) and not bool(args.dry_run) and args.regulatory_bundle_dir is not None:
+        try:
+            payload["regulatory_bundle"] = build_regulatory_bundle(
+                payload=payload,
+                bundle_dir=args.regulatory_bundle_dir,
+                campaign_run_path=None,
+                overwrite=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            payload.setdefault("warnings", []).append(
+                f"Regulatory bundle generation failed: {exc}"
+            )
 
     rendered = json.dumps(payload, indent=2)
     print(rendered)
@@ -839,6 +1138,10 @@ def _cmd_validate_plan(args: argparse.Namespace) -> int:
     policy = PlanPolicy(
         max_calls=max(1, int(args.max_calls)),
         require_validate_first=not bool(args.allow_skip_validate_first),
+        enforce_stage_progression=bool(args.enforce_stage_policy),
+        require_evidence_before_hypothesis=bool(
+            args.require_evidence_before_hypothesis
+        ),
     )
     check = evaluate_plan_policy(
         plan_payload,
@@ -925,7 +1228,14 @@ def _cmd_rank_portfolio(args: argparse.Namespace) -> int:
         translational_readiness=float(args.w_translational_readiness),
         novelty=float(args.w_novelty),
     )
-    ranked = rank_disease_programs(payload, weights=weights)
+    ranked = rank_disease_programs(
+        payload,
+        weights=weights,
+        total_budget=float(args.total_budget)
+        if args.total_budget is not None
+        else None,
+        voi_weight=float(args.voi_weight),
+    )
     rendered_payload = {
         "weights": {
             "burden": weights.burden,
@@ -933,6 +1243,12 @@ def _cmd_rank_portfolio(args: argparse.Namespace) -> int:
             "unmet_need": weights.unmet_need,
             "translational_readiness": weights.translational_readiness,
             "novelty": weights.novelty,
+        },
+        "portfolio_constraints": {
+            "total_budget": float(args.total_budget)
+            if args.total_budget is not None
+            else None,
+            "voi_weight": float(args.voi_weight),
         },
         "ranked": [item.to_json() for item in ranked],
     }

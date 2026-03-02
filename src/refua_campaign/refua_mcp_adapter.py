@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import html
 import ipaddress
@@ -39,9 +40,240 @@ _HTTP_USER_AGENT = "ClawCures/1.0"
 _ALLOW_PRIVATE_FETCH_ENV = "CLAWCURES_ALLOW_PRIVATE_WEB_FETCH"
 _OPENCLAW_DEFAULT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "additionalProperties": True,
+    "additionalProperties": False,
 }
 _OPENCLAW_TOOL_SCHEMA_OVERRIDES: dict[str, dict[str, Any]] = {
+    "refua_validate_spec": {
+        "type": "object",
+        "properties": {
+            "entities": {"type": ["array", "string"]},
+            "action": {"type": "string", "enum": ["fold", "affinity"]},
+            "name": {"type": "string"},
+            "base_dir": {"type": "string"},
+            "constraints": {"type": ["array", "string"]},
+            "affinity": {"type": ["boolean", "object", "null"]},
+            "run_boltz": {"type": "boolean"},
+            "run_boltzgen": {"type": "boolean"},
+            "boltz": {"type": "object"},
+            "boltzgen": {"type": "object"},
+            "admet": {
+                "type": ["string", "boolean", "object", "null"],
+            },
+            "structure_output_path": {"type": "string"},
+            "structure_output_format": {
+                "type": ["string", "null"],
+                "enum": ["cif", "mmcif", "bcif", None],
+            },
+            "feature_output_path": {"type": "string"},
+            "feature_output_format": {
+                "type": ["string", "null"],
+                "enum": ["torch", "npz", "json", None],
+            },
+            "deep_validate": {"type": "boolean"},
+        },
+        "required": ["entities"],
+        "additionalProperties": False,
+    },
+    "refua_fold": {
+        "type": "object",
+        "properties": {
+            "entities": {"type": ["array", "string"]},
+            "name": {"type": "string"},
+            "base_dir": {"type": "string"},
+            "constraints": {"type": ["array", "string", "null"]},
+            "affinity": {"type": ["boolean", "object", "null"]},
+            "run_boltz": {"type": "boolean"},
+            "run_boltzgen": {"type": "boolean"},
+            "boltz": {"type": "object"},
+            "boltzgen": {"type": "object"},
+            "admet": {"type": ["string", "boolean", "object", "null"]},
+            "structure_output_path": {"type": "string"},
+            "structure_output_format": {
+                "type": ["string", "null"],
+                "enum": ["cif", "mmcif", "bcif", None],
+            },
+            "feature_output_path": {"type": "string"},
+            "feature_output_format": {
+                "type": ["string", "null"],
+                "enum": ["torch", "npz", None],
+            },
+            "allow_exploratory_run": {"type": "boolean"},
+            "async_mode": {"type": "boolean"},
+            "queue_timeout_seconds": {"type": "number"},
+        },
+        "required": ["entities"],
+        "additionalProperties": False,
+    },
+    "refua_affinity": {
+        "type": "object",
+        "properties": {
+            "entities": {"type": ["array", "string"]},
+            "name": {"type": "string"},
+            "base_dir": {"type": "string"},
+            "binder": {"type": "string"},
+            "boltz": {"type": "object"},
+            "admet": {"type": ["string", "boolean", "object", "null"]},
+            "async_mode": {"type": "boolean"},
+            "queue_timeout_seconds": {"type": "number"},
+        },
+        "required": ["entities"],
+        "additionalProperties": False,
+    },
+    "refua_antibody_design": {
+        "type": "object",
+        "properties": {
+            "antibody": {"type": ["object", "string"]},
+            "context_entities": {"type": ["array", "string", "null"]},
+            "name": {"type": "string"},
+            "base_dir": {"type": "string"},
+            "constraints": {"type": ["array", "string", "null"]},
+            "affinity": {"type": ["boolean", "object", "null"]},
+            "run_boltz": {"type": "boolean"},
+            "run_boltzgen": {"type": "boolean"},
+            "boltz": {"type": "object"},
+            "boltzgen": {"type": "object"},
+            "admet": {"type": ["string", "boolean", "object", "null"]},
+            "structure_output_path": {"type": "string"},
+            "structure_output_format": {
+                "type": ["string", "null"],
+                "enum": ["cif", "mmcif", "bcif", None],
+            },
+            "feature_output_path": {"type": "string"},
+            "feature_output_format": {
+                "type": ["string", "null"],
+                "enum": ["torch", "npz", None],
+            },
+            "allow_exploratory_run": {"type": "boolean"},
+            "async_mode": {"type": "boolean"},
+            "queue_timeout_seconds": {"type": "number"},
+        },
+        "required": ["antibody"],
+        "additionalProperties": False,
+    },
+    "refua_protein_properties": {
+        "type": "object",
+        "properties": {
+            "sequence": {"type": "string"},
+            "properties": {
+                "type": ["array", "string", "null"],
+                "items": {"type": "string"},
+            },
+            "groups": {
+                "type": ["array", "string", "null"],
+                "items": {"type": "string"},
+            },
+            "lazy": {"type": "boolean"},
+            "sanitize": {"type": "boolean"},
+            "include_catalog": {"type": "boolean"},
+        },
+        "required": ["sequence"],
+        "additionalProperties": False,
+    },
+    "refua_clinical_simulator": {
+        "type": "object",
+        "properties": {
+            "config": {"type": ["object", "null"]},
+            "trial_id": {"type": ["string", "null"]},
+            "indication": {"type": ["string", "null"]},
+            "phase": {"type": ["string", "null"]},
+            "objective": {"type": ["string", "null"]},
+            "seed": {"type": ["integer", "null"]},
+            "replicates": {"type": ["integer", "null"]},
+            "include_replicates": {"type": "boolean"},
+            "include_workup": {"type": "boolean"},
+            "workup_options": {"type": ["object", "null"]},
+            "admet_profile": {"type": ["object", "null"]},
+            "refua_payload": {"type": ["object", "null"]},
+            "apply_refua_payload": {"type": "boolean"},
+            "refua_ligand_id": {"type": ["string", "null"]},
+            "refua_max_candidate_arms": {"type": "integer", "minimum": 1},
+        },
+        "additionalProperties": False,
+    },
+    "refua_data_list": {
+        "type": "object",
+        "properties": {
+            "tag": {"type": ["string", "null"]},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
+            "include_usage_notes": {"type": "boolean"},
+            "include_urls": {"type": "boolean"},
+            "cache_root": {"type": ["string", "null"]},
+        },
+        "additionalProperties": False,
+    },
+    "refua_data_fetch": {
+        "type": "object",
+        "properties": {
+            "dataset_id": {"type": "string"},
+            "force": {"type": "boolean"},
+            "refresh": {"type": "boolean"},
+            "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+            "cache_root": {"type": ["string", "null"]},
+            "include_metadata": {"type": "boolean"},
+        },
+        "required": ["dataset_id"],
+        "additionalProperties": False,
+    },
+    "refua_data_materialize": {
+        "type": "object",
+        "properties": {
+            "dataset_id": {"type": "string"},
+            "force": {"type": "boolean"},
+            "refresh": {"type": "boolean"},
+            "chunksize": {"type": "integer", "minimum": 1},
+            "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+            "cache_root": {"type": ["string", "null"]},
+            "include_manifest": {"type": "boolean"},
+        },
+        "required": ["dataset_id"],
+        "additionalProperties": False,
+    },
+    "refua_data_query": {
+        "type": "object",
+        "properties": {
+            "dataset_id": {"type": "string"},
+            "columns": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+            },
+            "filters": {"type": ["object", "null"]},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
+            "cache_root": {"type": ["string", "null"]},
+            "materialize_if_missing": {"type": "boolean"},
+            "force_materialize": {"type": "boolean"},
+            "refresh": {"type": "boolean"},
+            "chunksize": {"type": "integer", "minimum": 1},
+            "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+        },
+        "required": ["dataset_id"],
+        "additionalProperties": False,
+    },
+    "refua_job": {
+        "type": "object",
+        "properties": {
+            "job_id": {"type": "string"},
+            "include_result": {"type": "boolean"},
+            "wait_for_terminal_seconds": {"type": ["number", "null"]},
+            "cancel": {"type": "boolean"},
+        },
+        "required": ["job_id"],
+        "additionalProperties": False,
+    },
+    "refua_admet_profile": {
+        "type": "object",
+        "properties": {
+            "smiles": {"type": "string"},
+            "model_variant": {"type": "string"},
+            "max_new_tokens": {"type": "integer", "minimum": 1},
+            "include_scoring": {"type": "boolean"},
+            "task_ids": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["smiles"],
+        "additionalProperties": False,
+    },
     "web_search": {
         "type": "object",
         "properties": {
@@ -49,7 +281,8 @@ _OPENCLAW_TOOL_SCHEMA_OVERRIDES: dict[str, dict[str, Any]] = {
             "q": {"type": "string"},
             "count": {"type": "integer", "minimum": 1, "maximum": _MAX_SEARCH_COUNT},
         },
-        "additionalProperties": True,
+        "anyOf": [{"required": ["query"]}, {"required": ["q"]}],
+        "additionalProperties": False,
     },
     "web_fetch": {
         "type": "object",
@@ -59,13 +292,41 @@ _OPENCLAW_TOOL_SCHEMA_OVERRIDES: dict[str, dict[str, Any]] = {
             "max_chars": {"type": "integer", "minimum": 1, "maximum": _MAX_FETCH_CHARS},
         },
         "required": ["url"],
-        "additionalProperties": True,
+        "additionalProperties": False,
     },
 }
 _OPENCLAW_TOOL_DESCRIPTION_OVERRIDES: dict[str, str] = {
+    "refua_validate_spec": (
+        "Validate and normalize a typed Refua request before expensive inference."
+    ),
+    "refua_fold": "Run Refua fold/design workflows with typed entities and constraints.",
+    "refua_affinity": "Run affinity-focused Refua predictions for typed entities.",
+    "refua_antibody_design": "Run antibody-focused design/fold workflows with context.",
+    "refua_protein_properties": "Compute protein property descriptors for a sequence.",
+    "refua_clinical_simulator": (
+        "Simulate trial outcomes and optional workups from trial configuration."
+    ),
+    "refua_data_list": "List datasets in the refua-data catalog.",
+    "refua_data_fetch": "Fetch one refua-data dataset to local cache.",
+    "refua_data_materialize": (
+        "Materialize one refua-data dataset to parquet with manifest output."
+    ),
+    "refua_data_query": "Query rows from a materialized refua-data dataset.",
+    "refua_job": "Poll, wait for, or cancel an async Refua job by job_id.",
+    "refua_admet_profile": "Predict ADMET profile from a SMILES string.",
     "web_search": "Search public web sources for evidence relevant to a biomedical query.",
     "web_fetch": "Fetch and extract text/markdown from a specific public URL.",
 }
+_PARALLEL_SAFE_TOOLS: frozenset[str] = frozenset(
+    {
+        "refua_validate_spec",
+        "refua_protein_properties",
+        "refua_data_list",
+        "refua_data_query",
+        "web_search",
+        "web_fetch",
+    }
+)
 
 
 def _import_refua_mcp_server():
@@ -170,6 +431,59 @@ class RefuaMcpAdapter:
             args=dict(args),
             output=_to_plain_data(result),
         )
+
+    def is_parallel_safe_tool(self, tool: str) -> bool:
+        return tool in _PARALLEL_SAFE_TOOLS
+
+    def parallel_safe_tools(self) -> list[str]:
+        return sorted(name for name in self.available_tools() if name in _PARALLEL_SAFE_TOOLS)
+
+    def execute_tools_parallel(
+        self,
+        calls: list[tuple[str, dict[str, Any]]],
+        *,
+        max_workers: int = 4,
+        fail_fast: bool = False,
+    ) -> list[ToolExecutionResult]:
+        if not calls:
+            return []
+
+        normalized_calls: list[tuple[str, dict[str, Any]]] = []
+        for idx, (tool, args) in enumerate(calls):
+            if not isinstance(tool, str) or not tool.strip():
+                raise ValueError(f"Call #{idx + 1} tool must be a non-empty string.")
+            if not isinstance(args, dict):
+                raise ValueError(f"Call #{idx + 1} args must be an object.")
+            normalized_calls.append((tool.strip(), dict(args)))
+
+        workers = max(1, int(max_workers))
+        workers = min(workers, len(normalized_calls))
+        ordered_results: list[ToolExecutionResult | None] = [None] * len(normalized_calls)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_index = {
+                executor.submit(self.execute_tool, tool, args): idx
+                for idx, (tool, args) in enumerate(normalized_calls)
+            }
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                tool, args = normalized_calls[idx]
+                try:
+                    ordered_results[idx] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    if fail_fast:
+                        raise
+                    ordered_results[idx] = ToolExecutionResult(
+                        tool=tool,
+                        args=args,
+                        output={
+                            "error": str(exc),
+                            "failed_tool": tool,
+                            "recoverable": True,
+                        },
+                    )
+
+        return [item for item in ordered_results if item is not None]
 
     def openclaw_tool_schemas(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []

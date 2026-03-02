@@ -73,6 +73,13 @@ _MISSION_TARGET_DISCOVERY_QUERIES: tuple[dict[str, str], ...] = (
         ),
     },
 )
+_MISSION_EVIDENCE_URLS: tuple[str, ...] = (
+    "https://www.who.int/news-room/fact-sheets/detail/the-top-10-causes-of-death",
+    "https://www.who.int/news-room/fact-sheets/detail/cardiovascular-diseases-(cvds)",
+    "https://www.who.int/news-room/fact-sheets/detail/cancer",
+    "https://www.who.int/news-room/fact-sheets/detail/tuberculosis",
+    "https://www.who.int/news-room/fact-sheets/detail/alzheimer-disease-and-other-dementias",
+)
 _MISSION_BOOTSTRAP_PROGRAMS: tuple[dict[str, str], ...] = (
     {
         "disease_slug": "ischemic_heart_disease",
@@ -172,6 +179,8 @@ class CampaignOrchestrator:
         evidence_items: list[dict[str, Any]] | None = None,
         native_discovery_bootstrap_rounds: int = 0,
         native_tool_fail_fast: bool = False,
+        native_parallel_tool_calls: bool = True,
+        native_tool_max_workers: int = 4,
         auto_web_fetch: bool = False,
         auto_web_fetch_max_urls: int = 6,
         auto_web_fetch_max_chars: int = 20_000,
@@ -191,6 +200,8 @@ class CampaignOrchestrator:
             int(native_discovery_bootstrap_rounds),
         )
         self._native_tool_fail_fast = bool(native_tool_fail_fast)
+        self._native_parallel_tool_calls = bool(native_parallel_tool_calls)
+        self._native_tool_max_workers = max(1, int(native_tool_max_workers))
         self._auto_web_fetch = bool(auto_web_fetch)
         self._auto_web_fetch_max_urls = max(0, int(auto_web_fetch_max_urls))
         self._auto_web_fetch_max_chars = max(1, int(auto_web_fetch_max_chars))
@@ -379,7 +390,7 @@ class CampaignOrchestrator:
                 instructions=system_prompt.strip(),
                 tools=turn_tool_schemas,
                 tool_choice="auto",
-                parallel_tool_calls=False,
+                parallel_tool_calls=self._native_parallel_tool_calls,
                 **request_kwargs,
             )
             if response.text.strip():
@@ -391,21 +402,8 @@ class CampaignOrchestrator:
                 break
 
             pending_input_items = []
-            for call in response.function_calls:
-                try:
-                    result = self._refua_mcp.execute_tool(call.name, call.arguments)
-                except Exception as exc:  # noqa: BLE001
-                    if self._native_tool_fail_fast:
-                        raise
-                    result = ToolExecutionResult(
-                        tool=call.name,
-                        args=dict(call.arguments),
-                        output={
-                            "error": str(exc),
-                            "failed_tool": call.name,
-                            "recoverable": True,
-                        },
-                    )
+            round_results = self._execute_native_function_calls(response.function_calls)
+            for call, result in zip(response.function_calls, round_results):
                 results.append(result)
                 executed_calls.append({"tool": result.tool, "args": result.args})
                 pending_input_items.append(
@@ -427,7 +425,7 @@ class CampaignOrchestrator:
                         results = expanded
                         for generated_item in new_items:
                             executed_calls.append(
-                                {"tool": generated_item.tool, "args": generated_item.args}
+                                    {"tool": generated_item.tool, "args": generated_item.args}
                             )
         else:
             transcript.append(
@@ -441,6 +439,54 @@ class CampaignOrchestrator:
             plan={"calls": executed_calls},
             results=results,
         )
+
+    def _execute_native_function_calls(
+        self,
+        function_calls: list[Any],
+    ) -> list[ToolExecutionResult]:
+        if not function_calls:
+            return []
+
+        if (
+            self._native_parallel_tool_calls
+            and len(function_calls) > 1
+            and all(self._is_parallel_safe_tool(call.name) for call in function_calls)
+        ):
+            execute_parallel = getattr(self._refua_mcp, "execute_tools_parallel", None)
+            if callable(execute_parallel):
+                return execute_parallel(
+                    [(call.name, call.arguments) for call in function_calls],
+                    max_workers=self._native_tool_max_workers,
+                    fail_fast=self._native_tool_fail_fast,
+                )
+
+        round_results: list[ToolExecutionResult] = []
+        for call in function_calls:
+            try:
+                result = self._refua_mcp.execute_tool(call.name, call.arguments)
+            except Exception as exc:  # noqa: BLE001
+                if self._native_tool_fail_fast:
+                    raise
+                result = ToolExecutionResult(
+                    tool=call.name,
+                    args=dict(call.arguments),
+                    output={
+                        "error": str(exc),
+                        "failed_tool": call.name,
+                        "recoverable": True,
+                    },
+                )
+            round_results.append(result)
+        return round_results
+
+    def _is_parallel_safe_tool(self, tool: str) -> bool:
+        checker = getattr(self._refua_mcp, "is_parallel_safe_tool", None)
+        if callable(checker):
+            try:
+                return bool(checker(tool))
+            except Exception:
+                return False
+        return False
 
 
 def _extract_json_plan(
@@ -667,6 +713,22 @@ def _validate_plan_call_shapes(plan: dict[str, Any]) -> None:
                     "'job_id'."
                 )
 
+        if tool in {"refua_data_fetch", "refua_data_materialize", "refua_data_query"}:
+            dataset_id = args.get("dataset_id")
+            if not isinstance(dataset_id, str) or not dataset_id.strip():
+                raise ValueError(
+                    f"Planner call #{index} for {tool} must include a non-empty "
+                    "'dataset_id'."
+                )
+
+        if tool == "refua_admet_profile":
+            smiles = args.get("smiles")
+            if not isinstance(smiles, str) or not smiles.strip():
+                raise ValueError(
+                    f"Planner call #{index} for refua_admet_profile must include a "
+                    "non-empty 'smiles'."
+                )
+
         if tool == "web_search":
             query = args.get("query")
             if not isinstance(query, str) or not query.strip():
@@ -732,6 +794,18 @@ def _build_default_objective_fallback_plan(
     allowed_set = set(allowed_tools)
     calls: list[dict[str, Any]] = []
 
+    if "refua_data_list" in allowed_set:
+        calls.append(
+            {
+                "tool": "refua_data_list",
+                "args": {
+                    "limit": 25,
+                    "include_usage_notes": True,
+                    "include_urls": True,
+                },
+            }
+        )
+
     if "web_search" in allowed_set:
         for item in _MISSION_TARGET_DISCOVERY_QUERIES:
             calls.append(
@@ -744,15 +818,39 @@ def _build_default_objective_fallback_plan(
                 }
             )
 
+    if "web_fetch" in allowed_set:
+        for url in _MISSION_EVIDENCE_URLS[:3]:
+            calls.append(
+                {
+                    "tool": "web_fetch",
+                    "args": {
+                        "url": url,
+                        "extract_mode": "text",
+                        "max_chars": 12000,
+                    },
+                }
+            )
+
     if "refua_validate_spec" not in allowed_set:
         return {"calls": calls}
 
-    max_validation_calls = (
-        4 if "web_search" in allowed_set else len(_MISSION_BOOTSTRAP_PROGRAMS)
-    )
-    for item in _MISSION_BOOTSTRAP_PROGRAMS[:max_validation_calls]:
+    max_programs = 3 if ("web_search" in allowed_set or "web_fetch" in allowed_set) else 5
+    seed_programs = _MISSION_BOOTSTRAP_PROGRAMS[:max_programs]
+    for item in seed_programs:
         disease_slug = item["disease_slug"]
         candidate_slug = item["candidate_slug"]
+        entities = [
+            {
+                "type": "protein",
+                "id": "target",
+                "sequence": item["target_sequence"],
+            },
+            {
+                "type": "ligand",
+                "id": "candidate",
+                "smiles": item["smiles"],
+            },
+        ]
         calls.append(
             {
                 "tool": "refua_validate_spec",
@@ -760,21 +858,60 @@ def _build_default_objective_fallback_plan(
                     "name": f"{disease_slug}_{candidate_slug}_bootstrap",
                     "action": "affinity",
                     "deep_validate": False,
-                    "entities": [
-                        {
-                            "type": "protein",
-                            "id": "target",
-                            "sequence": item["target_sequence"],
-                        },
-                        {
-                            "type": "ligand",
-                            "id": "candidate",
-                            "smiles": item["smiles"],
-                        },
-                    ],
+                    "entities": entities,
                 },
             }
         )
+
+        if "refua_affinity" in allowed_set:
+            calls.append(
+                {
+                    "tool": "refua_affinity",
+                    "args": {
+                        "name": f"{disease_slug}_{candidate_slug}_affinity",
+                        "entities": entities,
+                    },
+                }
+            )
+        elif "refua_fold" in allowed_set:
+            calls.append(
+                {
+                    "tool": "refua_fold",
+                    "args": {
+                        "name": f"{disease_slug}_{candidate_slug}_fold",
+                        "entities": entities,
+                        "affinity": True,
+                    },
+                }
+            )
+
+        if "refua_admet_profile" in allowed_set:
+            calls.append(
+                {
+                    "tool": "refua_admet_profile",
+                    "args": {
+                        "smiles": item["smiles"],
+                    },
+                }
+            )
+
+        if "refua_clinical_simulator" in allowed_set:
+            calls.append(
+                {
+                    "tool": "refua_clinical_simulator",
+                    "args": {
+                        "trial_id": f"{disease_slug}_{candidate_slug}_phase2_sim",
+                        "indication": disease_slug.replace("_", " "),
+                        "phase": "Phase II",
+                        "objective": (
+                            "Assess translational potential for burden-prioritized "
+                            "disease program."
+                        ),
+                        "include_workup": True,
+                        "include_replicates": False,
+                    },
+                }
+            )
     return {"calls": calls}
 
 

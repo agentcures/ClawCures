@@ -141,6 +141,29 @@ class _FailingToolAdapter(_FakeAdapter):
         raise RuntimeError("simulated tool failure")
 
 
+class _ParallelSafeAdapter(_FakeAdapter):
+    def __init__(self) -> None:
+        super().__init__(["web_search", "web_fetch"])
+        self.parallel_calls: list[list[tuple[str, dict[str, Any]]]] = []
+
+    def is_parallel_safe_tool(self, tool: str) -> bool:
+        return tool in {"web_search", "web_fetch"}
+
+    def execute_tools_parallel(
+        self,
+        calls: list[tuple[str, dict[str, Any]]],
+        *,
+        max_workers: int = 4,
+        fail_fast: bool = False,
+    ) -> list[ToolExecutionResult]:
+        del max_workers, fail_fast
+        self.parallel_calls.append([(name, dict(args)) for name, args in calls])
+        return [
+            ToolExecutionResult(tool=name, args=dict(args), output={"ok": True})
+            for name, args in calls
+        ]
+
+
 def test_orchestrator_plan_repairs_invalid_first_response() -> None:
     openclaw = _FakeOpenClawClient(
         responses=[
@@ -338,6 +361,49 @@ def test_orchestrator_plan_applies_agent_routing_and_evidence_items() -> None:
     assert call.kwargs["model"] == "openclaw:oncology-planner"
     assert isinstance(call.kwargs["input_items"], list)
     assert any(item.get("text") == "paper evidence" for item in call.kwargs["input_items"])
+
+
+def test_orchestrator_native_tool_loop_uses_parallel_execution_for_safe_calls() -> None:
+    openclaw = _FakeNativeOpenClawClient(
+        responses=[
+            OpenClawResponse(
+                raw={"id": "resp_10"},
+                text="",
+                response_id="resp_10",
+                function_calls=[
+                    OpenClawFunctionCall(
+                        call_id="call_10",
+                        name="web_search",
+                        arguments={"query": "egfr", "count": 2},
+                    ),
+                    OpenClawFunctionCall(
+                        call_id="call_11",
+                        name="web_fetch",
+                        arguments={"url": "https://example.org"},
+                    ),
+                ],
+            ),
+            OpenClawResponse(
+                raw={"id": "resp_11", "output_text": "Done."},
+                text="Done.",
+                response_id="resp_11",
+                function_calls=[],
+            ),
+        ]
+    )
+    adapter = _ParallelSafeAdapter()
+    orchestrator = CampaignOrchestrator(
+        openclaw=openclaw,
+        refua_mcp=adapter,
+        native_parallel_tool_calls=True,
+    )
+
+    run = orchestrator.run_native_tool_loop(
+        objective="Find targets.",
+        system_prompt="Use tools.",
+    )
+    assert len(run.results) == 2
+    assert adapter.parallel_calls
 
 
 def test_orchestrator_execute_plan_auto_expands_web_fetch_results() -> None:

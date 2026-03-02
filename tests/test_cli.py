@@ -41,11 +41,23 @@ def test_run_parser_accepts_native_tool_loop_and_session_flags() -> None:
             "--native-discovery-bootstrap-rounds",
             "2",
             "--native-tool-fail-fast",
+            "--disable-native-parallel-tool-calls",
+            "--native-tool-max-workers",
+            "6",
             "--auto-web-fetch",
             "--auto-web-fetch-max-urls",
             "9",
             "--auto-web-fetch-max-chars",
             "7777",
+            "--policy-max-calls",
+            "18",
+            "--enforce-stage-policy",
+            "--require-evidence-before-hypothesis",
+            "--strict-plan-policy",
+            "--state-file",
+            "artifacts/campaign_state.json",
+            "--regulatory-bundle-dir",
+            "artifacts/bundle",
             "--agent-model-map-json",
             '{"planner":"openclaw:planner"}',
             "--evidence-file",
@@ -62,9 +74,17 @@ def test_run_parser_accepts_native_tool_loop_and_session_flags() -> None:
     assert args.stream_to_stderr is True
     assert args.native_discovery_bootstrap_rounds == 2
     assert args.native_tool_fail_fast is True
+    assert args.disable_native_parallel_tool_calls is True
+    assert args.native_tool_max_workers == 6
     assert args.auto_web_fetch is True
     assert args.auto_web_fetch_max_urls == 9
     assert args.auto_web_fetch_max_chars == 7777
+    assert args.policy_max_calls == 18
+    assert args.enforce_stage_policy is True
+    assert args.require_evidence_before_hypothesis is True
+    assert args.strict_plan_policy is True
+    assert str(args.state_file).endswith("campaign_state.json")
+    assert str(args.regulatory_bundle_dir).endswith("artifacts/bundle")
     assert args.agent_model_map_json == '{"planner":"openclaw:planner"}'
     assert len(args.evidence_file) == 1
     assert args.evidence_max_chars == 1234
@@ -84,6 +104,12 @@ def test_run_autonomous_parser_accepts_session_flags() -> None:
             "8",
             "--auto-web-fetch-max-chars",
             "4567",
+            "--enforce-stage-policy",
+            "--require-evidence-before-hypothesis",
+            "--state-file",
+            "artifacts/campaign_state.json",
+            "--regulatory-bundle-dir",
+            "artifacts/bundle",
             "--agent-model-map-json",
             '{"critic":"openclaw:critic"}',
             "--evidence-file",
@@ -96,5 +122,9 @@ def test_run_autonomous_parser_accepts_session_flags() -> None:
     assert args.auto_web_fetch is True
     assert args.auto_web_fetch_max_urls == 8
     assert args.auto_web_fetch_max_chars == 4567
+    assert args.enforce_stage_policy is True
+    assert args.require_evidence_before_hypothesis is True
+    assert str(args.state_file).endswith("campaign_state.json")
+    assert str(args.regulatory_bundle_dir).endswith("artifacts/bundle")
     assert args.agent_model_map_json == '{"critic":"openclaw:critic"}'
     assert len(args.evidence_file) == 1

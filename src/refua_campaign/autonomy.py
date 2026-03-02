@@ -9,11 +9,49 @@ from refua_campaign.openclaw_client import OpenClawClient
 from refua_campaign.orchestrator import _extract_first_json_object, _extract_json_plan
 from refua_campaign.prompts import planner_suffix
 
+_TOOL_STAGE_INDEX: dict[str, int] = {
+    "web_search": 0,
+    "web_fetch": 0,
+    "refua_data_list": 0,
+    "refua_data_fetch": 0,
+    "refua_data_materialize": 0,
+    "refua_data_query": 0,
+    "refua_validate_spec": 1,
+    "refua_fold": 2,
+    "refua_affinity": 2,
+    "refua_antibody_design": 2,
+    "refua_protein_properties": 2,
+    "refua_admet_profile": 3,
+    "refua_clinical_simulator": 4,
+    "refua_job": 5,
+}
+_EVIDENCE_TOOLS: frozenset[str] = frozenset(
+    {
+        "web_search",
+        "web_fetch",
+        "refua_data_list",
+        "refua_data_fetch",
+        "refua_data_materialize",
+        "refua_data_query",
+    }
+)
+_HYPOTHESIS_TOOLS: frozenset[str] = frozenset(
+    {
+        "refua_fold",
+        "refua_affinity",
+        "refua_antibody_design",
+        "refua_admet_profile",
+        "refua_clinical_simulator",
+    }
+)
+
 
 @dataclass(frozen=True)
 class PlanPolicy:
     max_calls: int = 10
     require_validate_first: bool = True
+    enforce_stage_progression: bool = False
+    require_evidence_before_hypothesis: bool = False
 
 
 @dataclass(frozen=True)
@@ -242,7 +280,8 @@ class AutonomousPlanner:
             instructions=(
                 "Return JSON only with shape "
                 '{"approved":bool,"issues":[...],"suggested_fixes":[...]}. '
-                "Reject plans that are vague, unsafe, or non-executable."
+                "Reject plans that are vague, unsafe, non-executable, skip staged "
+                "validation, or make claims without evidence-linked calls."
             ),
             **self._request_kwargs(phase="critic-loop", objective=objective),
         )
@@ -320,11 +359,98 @@ def evaluate_plan_policy(
                 "First call is not refua_validate_spec; high-cost calls may fail later."
             )
 
+    ordered_tools = _ordered_plan_tools(calls)
+    if policy.require_evidence_before_hypothesis:
+        first_hypothesis_index = _first_tool_index(ordered_tools, _HYPOTHESIS_TOOLS)
+        if first_hypothesis_index is not None:
+            evidence_before = any(
+                tool in _EVIDENCE_TOOLS for tool in ordered_tools[:first_hypothesis_index]
+            )
+            if not evidence_before:
+                errors.append(
+                    "Policy requires evidence collection before hypothesis-heavy calls "
+                    "(design/admet/clinical)."
+                )
+
+    if policy.enforce_stage_progression:
+        errors.extend(_stage_progression_errors(ordered_tools))
+        warnings.extend(_stage_progression_warnings(ordered_tools))
+
     return PolicyCheck(
         approved=(len(errors) == 0),
         errors=tuple(errors),
         warnings=tuple(warnings),
     )
+
+
+def _ordered_plan_tools(calls: list[Any]) -> list[str]:
+    tools: list[str] = []
+    for entry in calls:
+        if not isinstance(entry, dict):
+            continue
+        tool = entry.get("tool")
+        if isinstance(tool, str) and tool.strip():
+            tools.append(tool.strip())
+    return tools
+
+
+def _first_tool_index(tools: list[str], match: frozenset[str]) -> int | None:
+    for idx, tool in enumerate(tools):
+        if tool in match:
+            return idx
+    return None
+
+
+def _stage_progression_errors(tools: list[str]) -> list[str]:
+    if not tools:
+        return []
+
+    errors: list[str] = []
+    highest_seen = -1
+    seen_validation = False
+    seen_design = False
+
+    for idx, tool in enumerate(tools, start=1):
+        stage = _TOOL_STAGE_INDEX.get(tool)
+        if stage is None:
+            continue
+
+        if stage > highest_seen + 1:
+            errors.append(
+                f"Call #{idx} ({tool}) jumps pipeline stages; add missing intermediate "
+                "stage calls first."
+            )
+        highest_seen = max(highest_seen, stage)
+
+        if stage == 1:
+            seen_validation = True
+        if stage == 2:
+            seen_design = True
+
+        if stage >= 2 and not seen_validation:
+            errors.append(
+                f"Call #{idx} ({tool}) requires prior refua_validate_spec validation."
+            )
+        if stage >= 4 and not seen_design:
+            errors.append(
+                f"Call #{idx} ({tool}) requires prior design/affinity stage calls."
+            )
+
+    return errors
+
+
+def _stage_progression_warnings(tools: list[str]) -> list[str]:
+    warnings: list[str] = []
+    if any(tool in {"refua_fold", "refua_affinity", "refua_antibody_design"} for tool in tools):
+        if "refua_admet_profile" not in tools:
+            warnings.append(
+                "Design/affinity calls present without refua_admet_profile; safety triage may be incomplete."
+            )
+    if "refua_clinical_simulator" in tools and "refua_admet_profile" not in tools:
+        warnings.append(
+            "Clinical simulation is present without ADMET profiling evidence."
+        )
+    return warnings
 
 
 def _parse_critic_json(text: str) -> dict[str, Any]:
