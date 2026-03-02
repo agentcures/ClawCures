@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from types import MethodType
+
 import pytest
 
-from refua_campaign.openclaw_client import _extract_response_text
+from refua_campaign.config import OpenClawConfig
+from refua_campaign.openclaw_client import OpenClawClient, _extract_function_calls, _extract_response_text
 from refua_campaign.orchestrator import _extract_json_plan
 
 
@@ -92,3 +95,81 @@ def test_extract_response_text_reads_nested_content() -> None:
         ]
     }
     assert _extract_response_text(payload) == '{"calls":[]}'
+
+
+def test_extract_function_calls_reads_openresponses_function_call_items() -> None:
+    payload = {
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "web_search",
+                "arguments": '{"query":"EGFR target biology","count":3}',
+            }
+        ]
+    }
+
+    calls = _extract_function_calls(payload)
+    assert len(calls) == 1
+    assert calls[0].call_id == "call_1"
+    assert calls[0].name == "web_search"
+    assert calls[0].arguments["query"] == "EGFR target biology"
+    assert calls[0].arguments["count"] == 3
+
+
+def test_create_response_forwards_optional_openclaw_fields() -> None:
+    config = OpenClawConfig(
+        base_url="http://localhost:12345",
+        model="openclaw:test",
+        timeout_seconds=10.0,
+        bearer_token=None,
+    )
+    client = OpenClawClient(config)
+    captured: dict[str, object] = {}
+
+    def fake_post_json(self: OpenClawClient, path: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["path"] = path
+        captured["payload"] = payload
+        return {
+            "id": "resp_2",
+            "output_text": "done",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_2",
+                    "name": "web_search",
+                    "arguments": '{"query":"KRAS pathway"}',
+                }
+            ],
+        }
+
+    client._post_json = MethodType(fake_post_json, client)  # type: ignore[method-assign]
+    response = client.create_response(
+        user_input="Find lung cancer targets",
+        input_items=[{"type": "function_call_output", "call_id": "call_1", "output": "{}"}],
+        instructions="Use tools.",
+        user="campaign-main",
+        store=True,
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "web_search", "parameters": {"type": "object"}},
+            }
+        ],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+        previous_response_id="resp_1",
+    )
+
+    assert captured["path"] == "/v1/responses"
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["input"] == [
+        {"type": "function_call_output", "call_id": "call_1", "output": "{}"}
+    ]
+    assert payload["user"] == "campaign-main"
+    assert payload["store"] is True
+    assert payload["previous_response_id"] == "resp_1"
+    assert response.response_id == "resp_2"
+    assert len(response.function_calls) == 1
+    assert response.function_calls[0].name == "web_search"

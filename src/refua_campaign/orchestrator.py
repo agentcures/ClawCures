@@ -154,10 +154,35 @@ class CampaignOrchestrator:
         refua_mcp: RefuaMcpAdapter,
         *,
         max_plan_attempts: int = 3,
+        session_key: str | None = None,
+        store_responses: bool | None = None,
+        native_tool_max_rounds: int = 8,
     ) -> None:
         self._openclaw = openclaw
         self._refua_mcp = refua_mcp
         self._max_plan_attempts = max(1, int(max_plan_attempts))
+        self._session_key = (session_key or "").strip() or None
+        self._store_responses = store_responses
+        self._native_tool_max_rounds = max(1, int(native_tool_max_rounds))
+
+    def _openclaw_request_kwargs(
+        self,
+        *,
+        phase: str,
+        metadata_extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {"component": "ClawCures", "phase": phase}
+        if metadata_extra:
+            metadata.update(metadata_extra)
+        if self._session_key:
+            metadata["session_key"] = self._session_key
+
+        kwargs: dict[str, Any] = {"metadata": metadata}
+        if self._session_key:
+            kwargs["user"] = self._session_key
+        if self._store_responses is not None:
+            kwargs["store"] = bool(self._store_responses)
+        return kwargs
 
     def plan(self, *, objective: str, system_prompt: str) -> tuple[str, dict[str, Any]]:
         allowed_tools = self._refua_mcp.available_tools()
@@ -173,7 +198,7 @@ class CampaignOrchestrator:
             if attempt == 1:
                 user_input = objective
                 attempt_instructions = instructions
-                metadata: dict[str, Any] = {"component": "ClawCures", "phase": "plan"}
+                request_kwargs = self._openclaw_request_kwargs(phase="plan")
             else:
                 user_input = _build_plan_repair_input(
                     objective=objective,
@@ -181,16 +206,15 @@ class CampaignOrchestrator:
                     error=last_error,
                 )
                 attempt_instructions = _build_plan_repair_instructions(allowed_tools)
-                metadata = {
-                    "component": "ClawCures",
-                    "phase": "plan-repair",
-                    "attempt": str(attempt),
-                }
+                request_kwargs = self._openclaw_request_kwargs(
+                    phase="plan-repair",
+                    metadata_extra={"attempt": str(attempt)},
+                )
 
             response = self._openclaw.create_response(
                 user_input=user_input,
                 instructions=attempt_instructions,
-                metadata=metadata,
+                **request_kwargs,
             )
             attempt_texts.append(response.text)
 
@@ -230,6 +254,76 @@ class CampaignOrchestrator:
 
     def execute_plan(self, plan: dict[str, Any]) -> list[ToolExecutionResult]:
         return self._refua_mcp.execute_plan(plan)
+
+    def run_native_tool_loop(
+        self,
+        *,
+        objective: str,
+        system_prompt: str,
+        max_rounds: int | None = None,
+    ) -> CampaignRun:
+        rounds = (
+            self._native_tool_max_rounds
+            if max_rounds is None
+            else max(1, int(max_rounds))
+        )
+        tool_schemas = self._refua_mcp.openclaw_tool_schemas()
+        if not tool_schemas:
+            raise RuntimeError("No OpenClaw function tool schemas are available.")
+
+        transcript: list[str] = []
+        executed_calls: list[dict[str, Any]] = []
+        results: list[ToolExecutionResult] = []
+        previous_response_id: str | None = None
+        pending_input_items: list[dict[str, Any]] | None = None
+
+        for round_index in range(1, rounds + 1):
+            request_kwargs = self._openclaw_request_kwargs(
+                phase="native-tool-loop",
+                metadata_extra={"round": str(round_index)},
+            )
+            response = self._openclaw.create_response(
+                user_input=objective if pending_input_items is None else "",
+                input_items=pending_input_items,
+                instructions=system_prompt.strip(),
+                tools=tool_schemas,
+                tool_choice="auto",
+                parallel_tool_calls=False,
+                previous_response_id=previous_response_id,
+                **request_kwargs,
+            )
+            if response.text.strip():
+                transcript.append(response.text.strip())
+            if response.response_id:
+                previous_response_id = response.response_id
+
+            if not response.function_calls:
+                break
+
+            pending_input_items = []
+            for call in response.function_calls:
+                result = self._refua_mcp.execute_tool(call.name, call.arguments)
+                results.append(result)
+                executed_calls.append({"tool": result.tool, "args": result.args})
+                pending_input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call.call_id,
+                        "output": json.dumps(result.output, ensure_ascii=True),
+                    }
+                )
+        else:
+            transcript.append(
+                f"Native tool loop reached max_rounds={rounds} before completion."
+            )
+
+        return CampaignRun(
+            objective=objective,
+            system_prompt=system_prompt,
+            planner_response_text="\n\n".join(transcript).strip(),
+            plan={"calls": executed_calls},
+            results=results,
+        )
 
 
 def _extract_json_plan(

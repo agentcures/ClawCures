@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -83,6 +84,36 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional JSON plan file. When set, OpenClaw planning is skipped.",
     )
+    run_parser.add_argument(
+        "--native-tool-loop",
+        action="store_true",
+        help=(
+            "Use OpenClaw native function-calling loop instead of JSON plan parsing. "
+            "Tools are executed turn-by-turn until a terminal assistant response."
+        ),
+    )
+    run_parser.add_argument(
+        "--native-tool-max-rounds",
+        type=int,
+        default=8,
+        help="Maximum OpenClaw native function-calling rounds.",
+    )
+    run_parser.add_argument(
+        "--session-key",
+        default=None,
+        help=(
+            "Optional stable OpenClaw user/session key for memory continuity. "
+            "Defaults to REFUA_CAMPAIGN_SESSION_KEY when set."
+        ),
+    )
+    run_parser.add_argument(
+        "--store-responses",
+        action="store_true",
+        help=(
+            "Request OpenClaw response storage for cross-turn memory. "
+            "Can also be set with REFUA_CAMPAIGN_STORE_RESPONSES."
+        ),
+    )
     run_parser.set_defaults(handler=_cmd_run)
 
     loop_parser = sub.add_parser(
@@ -136,6 +167,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional JSON plan file. When set, OpenClaw autonomous planning is skipped.",
+    )
+    loop_parser.add_argument(
+        "--session-key",
+        default=None,
+        help=(
+            "Optional stable OpenClaw user/session key for memory continuity. "
+            "Defaults to REFUA_CAMPAIGN_SESSION_KEY when set."
+        ),
+    )
+    loop_parser.add_argument(
+        "--store-responses",
+        action="store_true",
+        help=(
+            "Request OpenClaw response storage for cross-turn memory. "
+            "Can also be set with REFUA_CAMPAIGN_STORE_RESPONSES."
+        ),
     )
     loop_parser.set_defaults(handler=_cmd_run_autonomous)
 
@@ -381,21 +428,56 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     adapter, adapter_error = _build_adapter()
 
+    env_session_key = os.getenv("REFUA_CAMPAIGN_SESSION_KEY", "").strip() or None
+    session_key = str(args.session_key).strip() if args.session_key else env_session_key
+    if session_key == "":
+        session_key = None
+
+    store_from_env = _parse_optional_bool_env("REFUA_CAMPAIGN_STORE_RESPONSES")
+    store_responses: bool | None
+    if bool(args.store_responses):
+        store_responses = True
+    else:
+        store_responses = store_from_env
+
     openclaw = OpenClawClient(OpenClawConfig.from_env())
-    orchestrator = CampaignOrchestrator(openclaw=openclaw, refua_mcp=adapter)
+    orchestrator = CampaignOrchestrator(
+        openclaw=openclaw,
+        refua_mcp=adapter,
+        session_key=session_key,
+        store_responses=store_responses,
+        native_tool_max_rounds=max(1, int(args.native_tool_max_rounds)),
+    )
 
     planner_text = ""
-    if args.plan_file is not None:
+    if bool(args.native_tool_loop):
+        if args.plan_file is not None:
+            raise ValueError("--native-tool-loop cannot be used with --plan-file.")
+        if run_config.dry_run:
+            raise ValueError("--native-tool-loop cannot be used with --dry-run.")
+        if adapter_error is not None:
+            raise RuntimeError(str(adapter_error))
+        native_run = orchestrator.run_native_tool_loop(
+            objective=run_config.objective,
+            system_prompt=system_prompt,
+            max_rounds=max(1, int(args.native_tool_max_rounds)),
+        )
+        planner_text = native_run.planner_response_text
+        plan = native_run.plan
+        results = native_run.results
+    elif args.plan_file is not None:
         plan_payload = json.loads(args.plan_file.read_text(encoding="utf-8"))
         if not isinstance(plan_payload, dict):
             raise ValueError("--plan-file must contain a JSON object.")
         plan = plan_payload
         planner_text = "Loaded from --plan-file"
+        results = []
     else:
         planner_text, plan = orchestrator.plan(
             objective=run_config.objective,
             system_prompt=system_prompt,
         )
+        results = []
 
     if run_config.dry_run:
         payload = {
@@ -404,13 +486,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "planner_response_text": planner_text,
             "plan": plan,
             "dry_run": True,
+            "native_tool_loop": bool(args.native_tool_loop),
         }
         if adapter_error is not None:
             payload["warnings"] = [str(adapter_error)]
     else:
-        if adapter_error is not None:
+        if adapter_error is not None and not bool(args.native_tool_loop):
             raise RuntimeError(str(adapter_error))
-        results = orchestrator.execute_plan(plan)
+        if not bool(args.native_tool_loop):
+            results = orchestrator.execute_plan(plan)
         serialized_results = [
             {
                 "tool": item.tool,
@@ -434,7 +518,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 interesting_targets
             ),
             "dry_run": False,
+            "native_tool_loop": bool(args.native_tool_loop),
         }
+        if session_key is not None:
+            payload["session_key"] = session_key
+        if store_responses is not None:
+            payload["store_responses"] = bool(store_responses)
 
     rendered = json.dumps(payload, indent=2)
     print(rendered)
@@ -449,6 +538,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _cmd_run_autonomous(args: argparse.Namespace) -> int:
     system_prompt = load_system_prompt(args.system_prompt_file)
     adapter, adapter_error = _build_adapter()
+    env_session_key = os.getenv("REFUA_CAMPAIGN_SESSION_KEY", "").strip() or None
+    session_key = str(args.session_key).strip() if args.session_key else env_session_key
+    if session_key == "":
+        session_key = None
+    store_from_env = _parse_optional_bool_env("REFUA_CAMPAIGN_STORE_RESPONSES")
+    store_responses = True if bool(args.store_responses) else store_from_env
     policy = PlanPolicy(
         max_calls=max(1, int(args.max_calls)),
         require_validate_first=not bool(args.allow_skip_validate_first),
@@ -489,6 +584,8 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
             openclaw=openclaw,
             available_tools=adapter.available_tools(),
             policy=policy,
+            session_key=session_key,
+            store_responses=store_responses,
         )
         plan_result = planner.run(
             objective=str(args.objective),
@@ -499,6 +596,10 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
 
     payload = dict(plan_result_payload)
     payload["dry_run"] = bool(args.dry_run)
+    if session_key is not None:
+        payload["session_key"] = session_key
+    if store_responses is not None:
+        payload["store_responses"] = bool(store_responses)
     if adapter_error is not None:
         payload.setdefault("warnings", []).append(str(adapter_error))
 
@@ -563,6 +664,17 @@ def _cmd_validate_plan(args: argparse.Namespace) -> int:
         payload.setdefault("warnings", []).append(str(adapter_error))
     print(json.dumps(payload, indent=2))
     return 0
+
+
+def _parse_optional_bool_env(name: str) -> bool | None:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return None
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value when set.")
 
 
 def _cmd_rank_portfolio(args: argparse.Namespace) -> int:

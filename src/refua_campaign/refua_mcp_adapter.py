@@ -37,6 +37,35 @@ _DEFAULT_MAX_FETCH_CHARS = 30_000
 _MAX_FETCH_CHARS = 200_000
 _HTTP_USER_AGENT = "ClawCures/1.0"
 _ALLOW_PRIVATE_FETCH_ENV = "CLAWCURES_ALLOW_PRIVATE_WEB_FETCH"
+_OPENCLAW_DEFAULT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": True,
+}
+_OPENCLAW_TOOL_SCHEMA_OVERRIDES: dict[str, dict[str, Any]] = {
+    "web_search": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "q": {"type": "string"},
+            "count": {"type": "integer", "minimum": 1, "maximum": _MAX_SEARCH_COUNT},
+        },
+        "additionalProperties": True,
+    },
+    "web_fetch": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "format": "uri"},
+            "extract_mode": {"type": "string", "enum": ["markdown", "text"]},
+            "max_chars": {"type": "integer", "minimum": 1, "maximum": _MAX_FETCH_CHARS},
+        },
+        "required": ["url"],
+        "additionalProperties": True,
+    },
+}
+_OPENCLAW_TOOL_DESCRIPTION_OVERRIDES: dict[str, str] = {
+    "web_search": "Search public web sources for evidence relevant to a biomedical query.",
+    "web_fetch": "Fetch and extract text/markdown from a specific public URL.",
+}
 
 
 def _import_refua_mcp_server():
@@ -141,6 +170,26 @@ class RefuaMcpAdapter:
             args=dict(args),
             output=_to_plain_data(result),
         )
+
+    def openclaw_tool_schemas(self) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = []
+        for name in self.available_tools():
+            schema = _OPENCLAW_TOOL_SCHEMA_OVERRIDES.get(name, _OPENCLAW_DEFAULT_SCHEMA)
+            description = _OPENCLAW_TOOL_DESCRIPTION_OVERRIDES.get(
+                name,
+                f"Execute {name} with typed arguments.",
+            )
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": description,
+                        "parameters": schema,
+                    },
+                }
+            )
+        return tools
 
     def execute_plan(self, plan: dict[str, Any]) -> list[ToolExecutionResult]:
         calls = plan.get("calls")

@@ -75,6 +75,8 @@ ClawCures run \
 | `REFUA_CAMPAIGN_OPENCLAW_TOKEN` | unset | Bearer token override |
 | `OPENCLAW_GATEWAY_TOKEN` | unset | Gateway token fallback |
 | `OPENCLAW_GATEWAY_PASSWORD` | unset | Password-mode fallback token |
+| `REFUA_CAMPAIGN_SESSION_KEY` | unset | Optional stable OpenClaw `user` key for cross-turn memory |
+| `REFUA_CAMPAIGN_STORE_RESPONSES` | unset | Optional bool (`true/false`) for OpenClaw response storage |
 | `BRAVE_API_KEY` | unset | Optional key for higher-quality `web_search` results |
 | `CLAWCURES_ALLOW_PRIVATE_WEB_FETCH` | unset | Set `true` to allow `web_fetch` against localhost/private IPs |
 
@@ -96,6 +98,16 @@ Run one plan + execute cycle:
 ```bash
 ClawCures run \
   --output artifacts/kras_campaign_run.json
+```
+
+Run with OpenClaw native function calling (no intermediate JSON plan parsing):
+
+```bash
+ClawCures run \
+  --native-tool-loop \
+  --session-key mission-all-disease-v1 \
+  --store-responses \
+  --output artifacts/native_tool_loop_run.json
 ```
 
 The run JSON now includes:
@@ -168,6 +180,8 @@ Primary references:
 - All tool calls go through a strict allowlist.
 - `web_search` and `web_fetch` are included in the allowlist for target/evidence discovery.
 - `web_fetch` blocks localhost/private-network targets by default for safety.
+- `--native-tool-loop` uses OpenClaw function calls directly, executing tools turn-by-turn.
+- `--session-key` + `--store-responses` wire OpenClaw session memory across campaign turns.
 - Mission framing is aspirational; never claim cures without evidence.
 - For local-model reliability, planner output is auto-repaired and canonicalized (`args`/tool aliases) before execution.
 - Architecture details: `docs/ARCHITECTURE.md`

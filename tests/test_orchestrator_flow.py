@@ -5,8 +5,9 @@ from typing import Any
 
 import pytest
 
-from refua_campaign.openclaw_client import OpenClawResponse
+from refua_campaign.openclaw_client import OpenClawFunctionCall, OpenClawResponse
 from refua_campaign.orchestrator import CampaignOrchestrator
+from refua_campaign.refua_mcp_adapter import ToolExecutionResult
 
 
 @dataclass
@@ -14,6 +15,7 @@ class _CapturedCall:
     user_input: str
     instructions: str
     metadata: dict[str, Any] | None
+    kwargs: dict[str, Any]
 
 
 class _FakeOpenClawClient:
@@ -27,12 +29,14 @@ class _FakeOpenClawClient:
         user_input: str,
         instructions: str,
         metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> OpenClawResponse:
         self.calls.append(
             _CapturedCall(
                 user_input=user_input,
                 instructions=instructions,
                 metadata=metadata,
+                kwargs=kwargs,
             )
         )
         if not self._responses:
@@ -41,12 +45,56 @@ class _FakeOpenClawClient:
         return OpenClawResponse(raw={"output_text": text}, text=text)
 
 
+class _FakeNativeOpenClawClient:
+    def __init__(self, responses: list[OpenClawResponse]) -> None:
+        self._responses = list(responses)
+        self.calls: list[_CapturedCall] = []
+
+    def create_response(
+        self,
+        *,
+        user_input: str,
+        instructions: str,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> OpenClawResponse:
+        self.calls.append(
+            _CapturedCall(
+                user_input=user_input,
+                instructions=instructions,
+                metadata=metadata,
+                kwargs=kwargs,
+            )
+        )
+        if not self._responses:
+            raise AssertionError("No fake response remaining.")
+        return self._responses.pop(0)
+
+
 class _FakeAdapter:
     def __init__(self, tools: list[str]) -> None:
         self._tools = list(tools)
+        self.native_execute_calls: list[tuple[str, dict[str, Any]]] = []
 
     def available_tools(self) -> list[str]:
         return list(self._tools)
+
+    def openclaw_tool_schemas(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": f"Execute {name}.",
+                    "parameters": {"type": "object", "additionalProperties": True},
+                },
+            }
+            for name in self._tools
+        ]
+
+    def execute_tool(self, tool: str, args: dict[str, Any]) -> ToolExecutionResult:
+        self.native_execute_calls.append((tool, dict(args)))
+        return ToolExecutionResult(tool=tool, args=dict(args), output={"ok": True})
 
     def execute_plan(self, _plan: dict[str, Any]) -> list[Any]:
         return []
@@ -166,3 +214,58 @@ def test_orchestrator_plan_raises_for_non_mission_objective_after_failures() -> 
             objective="Build a focused EGFR plan.",
             system_prompt="Return strict JSON plans.",
         )
+
+
+def test_orchestrator_native_tool_loop_executes_function_calls() -> None:
+    openclaw = _FakeNativeOpenClawClient(
+        responses=[
+            OpenClawResponse(
+                raw={"id": "resp_1"},
+                text="",
+                response_id="resp_1",
+                function_calls=[
+                    OpenClawFunctionCall(
+                        call_id="call_1",
+                        name="web_search",
+                        arguments={
+                            "query": "lung cancer actionable targets EGFR KRAS",
+                            "count": 3,
+                        },
+                    )
+                ],
+            ),
+            OpenClawResponse(
+                raw={"id": "resp_2", "output_text": "Completed target discovery."},
+                text="Completed target discovery.",
+                response_id="resp_2",
+                function_calls=[],
+            ),
+        ]
+    )
+    adapter = _FakeAdapter(["web_search"])
+    orchestrator = CampaignOrchestrator(
+        openclaw=openclaw,
+        refua_mcp=adapter,
+        session_key="campaign-main",
+        store_responses=True,
+        native_tool_max_rounds=4,
+    )
+
+    run = orchestrator.run_native_tool_loop(
+        objective="Find disease targets with web evidence.",
+        system_prompt="Use tools.",
+    )
+
+    assert len(run.results) == 1
+    assert run.plan["calls"] == [
+        {
+            "tool": "web_search",
+            "args": {"query": "lung cancer actionable targets EGFR KRAS", "count": 3},
+        }
+    ]
+    assert "Completed target discovery." in run.planner_response_text
+    assert len(openclaw.calls) == 2
+    assert openclaw.calls[0].kwargs["user"] == "campaign-main"
+    assert openclaw.calls[0].kwargs["store"] is True
+    assert openclaw.calls[1].kwargs["previous_response_id"] == "resp_1"
+    assert isinstance(openclaw.calls[1].kwargs["input_items"], list)

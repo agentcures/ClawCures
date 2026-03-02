@@ -97,10 +97,14 @@ class AutonomousPlanner:
         openclaw: OpenClawClient,
         available_tools: list[str],
         policy: PlanPolicy,
+        session_key: str | None = None,
+        store_responses: bool | None = None,
     ) -> None:
         self._openclaw = openclaw
         self._available_tools = sorted(available_tools)
         self._policy = policy
+        self._session_key = (session_key or "").strip() or None
+        self._store_responses = store_responses
 
     def run(
         self,
@@ -185,7 +189,7 @@ class AutonomousPlanner:
         response = self._openclaw.create_response(
             user_input=objective,
             instructions=instructions,
-            metadata={"component": "ClawCures", "phase": "plan-loop"},
+            **self._request_kwargs(phase="plan-loop"),
         )
         plan = _extract_json_plan(response.text)
         return response.text, plan
@@ -224,14 +228,25 @@ class AutonomousPlanner:
                 '{"approved":bool,"issues":[...],"suggested_fixes":[...]}. '
                 "Reject plans that are vague, unsafe, or non-executable."
             ),
-            metadata={
-                "component": "ClawCures",
-                "phase": "critic-loop",
-            },
+            **self._request_kwargs(phase="critic-loop"),
         )
 
         parsed = _parse_critic_json(response.text)
         return response.text, parsed
+
+    def _request_kwargs(self, *, phase: str) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "metadata": {
+                "component": "ClawCures",
+                "phase": phase,
+            }
+        }
+        if self._session_key:
+            kwargs["user"] = self._session_key
+            kwargs["metadata"]["session_key"] = self._session_key
+        if self._store_responses is not None:
+            kwargs["store"] = bool(self._store_responses)
+        return kwargs
 
 
 def evaluate_plan_policy(
