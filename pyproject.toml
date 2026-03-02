@@ -32,7 +32,8 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
-  "refua-mcp>=0.7.0",
+  "refua-mcp>=0.6.0",
+  "refua-clinical>=0.7.0",
 ]
 
 [project.urls]
