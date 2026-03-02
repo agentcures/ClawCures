@@ -77,6 +77,7 @@ ClawCures run \
 | `OPENCLAW_GATEWAY_PASSWORD` | unset | Password-mode fallback token |
 | `REFUA_CAMPAIGN_SESSION_KEY` | unset | Optional stable OpenClaw `user` key for cross-turn memory |
 | `REFUA_CAMPAIGN_STORE_RESPONSES` | unset | Optional bool (`true/false`) for OpenClaw response storage |
+| `REFUA_CAMPAIGN_AGENT_MODEL_MAP_JSON` | unset | Optional JSON object for phase/domain model routing (e.g. `{"planner:oncology":"openclaw:oncology-planner","critic":"openclaw:critic"}`) |
 | `BRAVE_API_KEY` | unset | Optional key for higher-quality `web_search` results |
 | `CLAWCURES_ALLOW_PRIVATE_WEB_FETCH` | unset | Set `true` to allow `web_fetch` against localhost/private IPs |
 
@@ -107,6 +108,11 @@ ClawCures run \
   --native-tool-loop \
   --session-key mission-all-disease-v1 \
   --store-responses \
+  --stream \
+  --native-discovery-bootstrap-rounds 2 \
+  --auto-web-fetch \
+  --agent-model-map-json '{"planner:oncology":"openclaw:oncology-planner","critic":"openclaw:critic"}' \
+  --evidence-file docs/RESEARCH.md \
   --output artifacts/native_tool_loop_run.json
 ```
 
@@ -182,6 +188,12 @@ Primary references:
 - `web_fetch` blocks localhost/private-network targets by default for safety.
 - `--native-tool-loop` uses OpenClaw function calls directly, executing tools turn-by-turn.
 - `--session-key` + `--store-responses` wire OpenClaw session memory across campaign turns.
+- `--stream` requests OpenClaw streaming responses; `--stream-to-stderr` mirrors streamed deltas to stderr.
+- `--agent-model-map-file/--agent-model-map-json` enable disease/phase agent routing.
+- `--evidence-file` injects local literature text into OpenClaw input for evidence-grounded planning.
+- `--native-discovery-bootstrap-rounds` forces early native-loop rounds to web discovery tools only (`web_search`, `web_fetch`).
+- `--auto-web-fetch` follows discovered web_search URLs with bounded web_fetch calls for richer target evidence.
+- `--native-tool-fail-fast` disables recoverable tool-error feedback and fails immediately on tool exceptions.
 - Mission framing is aspirational; never claim cures without evidence.
 - For local-model reliability, planner output is auto-repaired and canonicalized (`args`/tool aliases) before execution.
 - Architecture details: `docs/ARCHITECTURE.md`

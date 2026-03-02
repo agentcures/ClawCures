@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from refua_campaign.autonomy import (
     AutonomousPlanner,
@@ -26,6 +27,7 @@ from refua_campaign.target_discovery import (
     extract_interesting_targets,
     summarize_interesting_targets,
 )
+from refua_campaign.web_evidence import expand_results_with_web_fetch
 
 DEFAULT_OBJECTIVE = (
     "Find cures for all diseases by prioritizing the highest-burden conditions and "
@@ -114,6 +116,83 @@ def build_parser() -> argparse.ArgumentParser:
             "Can also be set with REFUA_CAMPAIGN_STORE_RESPONSES."
         ),
     )
+    run_parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Enable OpenClaw streaming responses for planning/native loops.",
+    )
+    run_parser.add_argument(
+        "--stream-to-stderr",
+        action="store_true",
+        help="When --stream is enabled, print streamed text deltas to stderr.",
+    )
+    run_parser.add_argument(
+        "--native-discovery-bootstrap-rounds",
+        type=int,
+        default=0,
+        help=(
+            "During the first N native-tool rounds, constrain OpenClaw tools to "
+            "web_search/web_fetch for target discovery."
+        ),
+    )
+    run_parser.add_argument(
+        "--native-tool-fail-fast",
+        action="store_true",
+        help=(
+            "When set, stop immediately on native tool execution errors instead of "
+            "returning recoverable tool-error payloads to the model."
+        ),
+    )
+    run_parser.add_argument(
+        "--auto-web-fetch",
+        action="store_true",
+        help=(
+            "Automatically follow web_search result URLs with web_fetch to enrich "
+            "target-discovery evidence."
+        ),
+    )
+    run_parser.add_argument(
+        "--auto-web-fetch-max-urls",
+        type=int,
+        default=6,
+        help="Max auto-generated web_fetch calls from accumulated web_search results.",
+    )
+    run_parser.add_argument(
+        "--auto-web-fetch-max-chars",
+        type=int,
+        default=20000,
+        help="Max characters per auto-generated web_fetch call.",
+    )
+    run_parser.add_argument(
+        "--agent-model-map-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON file mapping routing keys to OpenClaw models "
+            "(e.g. planner:oncology, critic, default)."
+        ),
+    )
+    run_parser.add_argument(
+        "--agent-model-map-json",
+        default=None,
+        help="Optional JSON object string for agent model routing.",
+    )
+    run_parser.add_argument(
+        "--evidence-file",
+        action="append",
+        default=[],
+        type=Path,
+        help=(
+            "Path to literature/evidence text file to inject into OpenClaw input. "
+            "May be specified multiple times."
+        ),
+    )
+    run_parser.add_argument(
+        "--evidence-max-chars",
+        type=int,
+        default=20000,
+        help="Max characters to ingest per evidence file.",
+    )
     run_parser.set_defaults(handler=_cmd_run)
 
     loop_parser = sub.add_parser(
@@ -183,6 +262,61 @@ def build_parser() -> argparse.ArgumentParser:
             "Request OpenClaw response storage for cross-turn memory. "
             "Can also be set with REFUA_CAMPAIGN_STORE_RESPONSES."
         ),
+    )
+    loop_parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Enable OpenClaw streaming responses for planner/critic loop.",
+    )
+    loop_parser.add_argument(
+        "--auto-web-fetch",
+        action="store_true",
+        help=(
+            "Automatically follow web_search result URLs with web_fetch after final "
+            "plan execution."
+        ),
+    )
+    loop_parser.add_argument(
+        "--auto-web-fetch-max-urls",
+        type=int,
+        default=6,
+        help="Max auto-generated web_fetch calls from accumulated web_search results.",
+    )
+    loop_parser.add_argument(
+        "--auto-web-fetch-max-chars",
+        type=int,
+        default=20000,
+        help="Max characters per auto-generated web_fetch call.",
+    )
+    loop_parser.add_argument(
+        "--agent-model-map-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON file mapping routing keys to OpenClaw models "
+            "(e.g. planner:oncology, critic, default)."
+        ),
+    )
+    loop_parser.add_argument(
+        "--agent-model-map-json",
+        default=None,
+        help="Optional JSON object string for agent model routing.",
+    )
+    loop_parser.add_argument(
+        "--evidence-file",
+        action="append",
+        default=[],
+        type=Path,
+        help=(
+            "Path to literature/evidence text file to inject into OpenClaw input. "
+            "May be specified multiple times."
+        ),
+    )
+    loop_parser.add_argument(
+        "--evidence-max-chars",
+        type=int,
+        default=20000,
+        help="Max characters to ingest per evidence file.",
     )
     loop_parser.set_defaults(handler=_cmd_run_autonomous)
 
@@ -439,6 +573,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         store_responses = True
     else:
         store_responses = store_from_env
+    agent_model_map = _load_agent_model_map(
+        map_file=args.agent_model_map_file,
+        map_json=args.agent_model_map_json,
+    )
+    evidence_items = _load_evidence_items(
+        paths=list(args.evidence_file),
+        max_chars=max(1, int(args.evidence_max_chars)),
+    )
 
     openclaw = OpenClawClient(OpenClawConfig.from_env())
     orchestrator = CampaignOrchestrator(
@@ -447,6 +589,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
         session_key=session_key,
         store_responses=store_responses,
         native_tool_max_rounds=max(1, int(args.native_tool_max_rounds)),
+        agent_model_map=agent_model_map,
+        stream_responses=bool(args.stream),
+        stream_to_stderr=bool(args.stream_to_stderr),
+        evidence_items=evidence_items,
+        native_discovery_bootstrap_rounds=max(
+            0, int(args.native_discovery_bootstrap_rounds)
+        ),
+        native_tool_fail_fast=bool(args.native_tool_fail_fast),
+        auto_web_fetch=bool(args.auto_web_fetch),
+        auto_web_fetch_max_urls=max(0, int(args.auto_web_fetch_max_urls)),
+        auto_web_fetch_max_chars=max(1, int(args.auto_web_fetch_max_chars)),
     )
 
     planner_text = ""
@@ -488,6 +641,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "dry_run": True,
             "native_tool_loop": bool(args.native_tool_loop),
         }
+        if agent_model_map:
+            payload["agent_model_map"] = agent_model_map
+        if evidence_items:
+            payload["evidence_item_count"] = len(evidence_items)
+        payload["stream"] = bool(args.stream)
+        payload["auto_web_fetch"] = bool(args.auto_web_fetch)
         if adapter_error is not None:
             payload["warnings"] = [str(adapter_error)]
     else:
@@ -519,11 +678,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
             ),
             "dry_run": False,
             "native_tool_loop": bool(args.native_tool_loop),
+            "stream": bool(args.stream),
+            "auto_web_fetch": bool(args.auto_web_fetch),
         }
         if session_key is not None:
             payload["session_key"] = session_key
         if store_responses is not None:
             payload["store_responses"] = bool(store_responses)
+        if agent_model_map:
+            payload["agent_model_map"] = agent_model_map
+        if evidence_items:
+            payload["evidence_item_count"] = len(evidence_items)
 
     rendered = json.dumps(payload, indent=2)
     print(rendered)
@@ -544,6 +709,14 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
         session_key = None
     store_from_env = _parse_optional_bool_env("REFUA_CAMPAIGN_STORE_RESPONSES")
     store_responses = True if bool(args.store_responses) else store_from_env
+    agent_model_map = _load_agent_model_map(
+        map_file=args.agent_model_map_file,
+        map_json=args.agent_model_map_json,
+    )
+    evidence_items = _load_evidence_items(
+        paths=list(args.evidence_file),
+        max_chars=max(1, int(args.evidence_max_chars)),
+    )
     policy = PlanPolicy(
         max_calls=max(1, int(args.max_calls)),
         require_validate_first=not bool(args.allow_skip_validate_first),
@@ -586,6 +759,9 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
             policy=policy,
             session_key=session_key,
             store_responses=store_responses,
+            agent_model_map=agent_model_map,
+            stream_responses=bool(args.stream),
+            evidence_items=evidence_items,
         )
         plan_result = planner.run(
             objective=str(args.objective),
@@ -596,10 +772,16 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
 
     payload = dict(plan_result_payload)
     payload["dry_run"] = bool(args.dry_run)
+    payload["stream"] = bool(args.stream)
+    payload["auto_web_fetch"] = bool(args.auto_web_fetch)
     if session_key is not None:
         payload["session_key"] = session_key
     if store_responses is not None:
         payload["store_responses"] = bool(store_responses)
+    if agent_model_map:
+        payload["agent_model_map"] = agent_model_map
+    if evidence_items:
+        payload["evidence_item_count"] = len(evidence_items)
     if adapter_error is not None:
         payload.setdefault("warnings", []).append(str(adapter_error))
 
@@ -610,6 +792,14 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
         if not isinstance(final_plan, dict):
             raise ValueError("Final plan is missing from autonomous payload.")
         results = adapter.execute_plan(final_plan)
+        if bool(args.auto_web_fetch):
+            results, generated_auto_fetch = expand_results_with_web_fetch(
+                results=results,
+                execute_tool=adapter.execute_tool,  # type: ignore[attr-defined]
+                max_urls=max(0, int(args.auto_web_fetch_max_urls)),
+                max_chars=max(1, int(args.auto_web_fetch_max_chars)),
+            )
+            payload["auto_web_fetch_generated"] = generated_auto_fetch
         serialized_results = [
             {
                 "tool": item.tool,
@@ -675,6 +865,52 @@ def _parse_optional_bool_env(name: str) -> bool | None:
     if raw in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean value when set.")
+
+
+def _load_agent_model_map(
+    *,
+    map_file: Path | None,
+    map_json: str | None,
+) -> dict[str, str]:
+    payload: object = {}
+    if map_file is not None:
+        payload = json.loads(map_file.read_text(encoding="utf-8"))
+    elif map_json:
+        payload = json.loads(map_json)
+    else:
+        env_json = os.getenv("REFUA_CAMPAIGN_AGENT_MODEL_MAP_JSON", "").strip()
+        if env_json:
+            payload = json.loads(env_json)
+
+    if not isinstance(payload, dict):
+        if payload:
+            raise ValueError("Agent model map must be a JSON object.")
+        return {}
+    resolved: dict[str, str] = {}
+    for key, value in payload.items():
+        key_text = str(key).strip()
+        value_text = str(value).strip()
+        if not key_text or not value_text:
+            continue
+        resolved[key_text] = value_text
+    return resolved
+
+
+def _load_evidence_items(*, paths: list[Path], max_chars: int) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        clipped = text[:max_chars]
+        items.append(
+            {
+                "type": "input_text",
+                "text": (
+                    f"[Evidence File: {path}]\n"
+                    f"{clipped}"
+                ),
+            }
+        )
+    return items
 
 
 def _cmd_rank_portfolio(args: argparse.Namespace) -> int:

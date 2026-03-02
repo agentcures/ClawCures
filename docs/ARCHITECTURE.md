@@ -13,6 +13,7 @@
   - Calls OpenClaw Gateway OpenResponses endpoint (`/v1/responses`).
   - Returns raw response plus extracted text.
   - Parses native function-call items for turn-by-turn tool execution loops.
+  - Supports optional streaming event parsing and model overrides per request.
 
 - `refua_campaign.refua_mcp_adapter.RefuaMcpAdapter`
   - Executes typed `refua-mcp` calls through `refua_mcp.server`.
@@ -24,6 +25,8 @@
   - Parses JSON tool plans.
   - Dispatches execution via the adapter.
   - Supports OpenClaw native function-calling loops with optional session key + response storage wiring for memory continuity.
+  - Supports phase/domain model routing (multi-agent specialization) and evidence-file input injection.
+  - Supports optional native-loop discovery bootstrap rounds (web tool-only early turns), recoverable tool-error feedback, and automatic `web_search -> web_fetch` evidence expansion.
 
 - `refua_campaign.autonomy.AutonomousPlanner`
   - Runs planner/critic loops across multiple rounds.

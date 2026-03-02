@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from refua_campaign.agent_routing import pick_model_for_phase
 from refua_campaign.openclaw_client import OpenClawClient
 from refua_campaign.orchestrator import _extract_first_json_object, _extract_json_plan
 from refua_campaign.prompts import planner_suffix
@@ -99,12 +100,18 @@ class AutonomousPlanner:
         policy: PlanPolicy,
         session_key: str | None = None,
         store_responses: bool | None = None,
+        agent_model_map: dict[str, str] | None = None,
+        stream_responses: bool = False,
+        evidence_items: list[dict[str, Any]] | None = None,
     ) -> None:
         self._openclaw = openclaw
         self._available_tools = sorted(available_tools)
         self._policy = policy
         self._session_key = (session_key or "").strip() or None
         self._store_responses = store_responses
+        self._agent_model_map = dict(agent_model_map or {})
+        self._stream_responses = bool(stream_responses)
+        self._evidence_items = list(evidence_items or [])
 
     def run(
         self,
@@ -186,11 +193,20 @@ class AutonomousPlanner:
             + feedback_block
         )
 
-        response = self._openclaw.create_response(
-            user_input=objective,
-            instructions=instructions,
-            **self._request_kwargs(phase="plan-loop"),
-        )
+        request_kwargs = self._request_kwargs(phase="plan-loop", objective=objective)
+        if self._evidence_items:
+            response = self._openclaw.create_response(
+                user_input="",
+                input_items=[{"type": "input_text", "text": objective}, *self._evidence_items],
+                instructions=instructions,
+                **request_kwargs,
+            )
+        else:
+            response = self._openclaw.create_response(
+                user_input=objective,
+                instructions=instructions,
+                **request_kwargs,
+            )
         plan = _extract_json_plan(response.text)
         return response.text, plan
 
@@ -228,13 +244,13 @@ class AutonomousPlanner:
                 '{"approved":bool,"issues":[...],"suggested_fixes":[...]}. '
                 "Reject plans that are vague, unsafe, or non-executable."
             ),
-            **self._request_kwargs(phase="critic-loop"),
+            **self._request_kwargs(phase="critic-loop", objective=objective),
         )
 
         parsed = _parse_critic_json(response.text)
         return response.text, parsed
 
-    def _request_kwargs(self, *, phase: str) -> dict[str, Any]:
+    def _request_kwargs(self, *, phase: str, objective: str) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "metadata": {
                 "component": "ClawCures",
@@ -246,6 +262,15 @@ class AutonomousPlanner:
             kwargs["metadata"]["session_key"] = self._session_key
         if self._store_responses is not None:
             kwargs["store"] = bool(self._store_responses)
+        model_override = pick_model_for_phase(
+            phase=phase,
+            objective=objective,
+            model_map=self._agent_model_map,
+        )
+        if model_override is not None:
+            kwargs["model"] = model_override
+        if self._stream_responses:
+            kwargs["stream"] = True
         return kwargs
 
 

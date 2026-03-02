@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import difflib
 import json
+import sys
 from dataclasses import dataclass
 from typing import Any
 
+from refua_campaign.agent_routing import pick_model_for_phase
 from refua_campaign.openclaw_client import OpenClawClient
 from refua_campaign.prompts import planner_suffix
 from refua_campaign.refua_mcp_adapter import RefuaMcpAdapter, ToolExecutionResult
+from refua_campaign.web_evidence import expand_results_with_web_fetch
 
 _PLAN_REPAIR_TEXT_LIMIT = 12_000
 _ALL_DISEASE_OBJECTIVE_HINTS: tuple[str, ...] = (
@@ -122,6 +125,12 @@ _MISSION_BOOTSTRAP_PROGRAMS: tuple[dict[str, str], ...] = (
 )
 
 
+def _stderr_stream_callback(chunk: str) -> None:
+    if not chunk:
+        return
+    print(chunk, end="", file=sys.stderr, flush=True)
+
+
 @dataclass
 class CampaignRun:
     objective: str
@@ -157,6 +166,15 @@ class CampaignOrchestrator:
         session_key: str | None = None,
         store_responses: bool | None = None,
         native_tool_max_rounds: int = 8,
+        agent_model_map: dict[str, str] | None = None,
+        stream_responses: bool = False,
+        stream_to_stderr: bool = False,
+        evidence_items: list[dict[str, Any]] | None = None,
+        native_discovery_bootstrap_rounds: int = 0,
+        native_tool_fail_fast: bool = False,
+        auto_web_fetch: bool = False,
+        auto_web_fetch_max_urls: int = 6,
+        auto_web_fetch_max_chars: int = 20_000,
     ) -> None:
         self._openclaw = openclaw
         self._refua_mcp = refua_mcp
@@ -164,12 +182,28 @@ class CampaignOrchestrator:
         self._session_key = (session_key or "").strip() or None
         self._store_responses = store_responses
         self._native_tool_max_rounds = max(1, int(native_tool_max_rounds))
+        self._agent_model_map = dict(agent_model_map or {})
+        self._stream_responses = bool(stream_responses)
+        self._stream_to_stderr = bool(stream_to_stderr)
+        self._evidence_items = list(evidence_items or [])
+        self._native_discovery_bootstrap_rounds = max(
+            0,
+            int(native_discovery_bootstrap_rounds),
+        )
+        self._native_tool_fail_fast = bool(native_tool_fail_fast)
+        self._auto_web_fetch = bool(auto_web_fetch)
+        self._auto_web_fetch_max_urls = max(0, int(auto_web_fetch_max_urls))
+        self._auto_web_fetch_max_chars = max(1, int(auto_web_fetch_max_chars))
 
     def _openclaw_request_kwargs(
         self,
         *,
         phase: str,
+        objective: str,
+        allow_evidence: bool = False,
         metadata_extra: dict[str, Any] | None = None,
+        previous_response_id: str | None = None,
+        input_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         metadata: dict[str, Any] = {"component": "ClawCures", "phase": phase}
         if metadata_extra:
@@ -182,6 +216,27 @@ class CampaignOrchestrator:
             kwargs["user"] = self._session_key
         if self._store_responses is not None:
             kwargs["store"] = bool(self._store_responses)
+        model_override = pick_model_for_phase(
+            phase=phase,
+            objective=objective,
+            model_map=self._agent_model_map,
+        )
+        if model_override is not None:
+            kwargs["model"] = model_override
+        if self._stream_responses:
+            kwargs["stream"] = True
+            if self._stream_to_stderr:
+                kwargs["on_stream_text"] = _stderr_stream_callback
+        if previous_response_id:
+            kwargs["previous_response_id"] = previous_response_id
+
+        merged_input_items: list[dict[str, Any]] = []
+        if input_items:
+            merged_input_items.extend(input_items)
+        if allow_evidence and self._evidence_items:
+            merged_input_items.extend(self._evidence_items)
+        if merged_input_items:
+            kwargs["input_items"] = merged_input_items
         return kwargs
 
     def plan(self, *, objective: str, system_prompt: str) -> tuple[str, dict[str, Any]]:
@@ -198,7 +253,16 @@ class CampaignOrchestrator:
             if attempt == 1:
                 user_input = objective
                 attempt_instructions = instructions
-                request_kwargs = self._openclaw_request_kwargs(phase="plan")
+                first_turn_items: list[dict[str, Any]] | None = None
+                if self._evidence_items:
+                    first_turn_items = [{"type": "input_text", "text": objective}]
+                    user_input = ""
+                request_kwargs = self._openclaw_request_kwargs(
+                    phase="plan",
+                    objective=objective,
+                    allow_evidence=True,
+                    input_items=first_turn_items,
+                )
             else:
                 user_input = _build_plan_repair_input(
                     objective=objective,
@@ -208,6 +272,7 @@ class CampaignOrchestrator:
                 attempt_instructions = _build_plan_repair_instructions(allowed_tools)
                 request_kwargs = self._openclaw_request_kwargs(
                     phase="plan-repair",
+                    objective=objective,
                     metadata_extra={"attempt": str(attempt)},
                 )
 
@@ -253,7 +318,16 @@ class CampaignOrchestrator:
         )
 
     def execute_plan(self, plan: dict[str, Any]) -> list[ToolExecutionResult]:
-        return self._refua_mcp.execute_plan(plan)
+        executed = self._refua_mcp.execute_plan(plan)
+        if not self._auto_web_fetch:
+            return executed
+        expanded, _ = expand_results_with_web_fetch(
+            results=executed,
+            execute_tool=self._refua_mcp.execute_tool,
+            max_urls=self._auto_web_fetch_max_urls,
+            max_chars=self._auto_web_fetch_max_chars,
+        )
+        return expanded
 
     def run_native_tool_loop(
         self,
@@ -270,6 +344,7 @@ class CampaignOrchestrator:
         tool_schemas = self._refua_mcp.openclaw_tool_schemas()
         if not tool_schemas:
             raise RuntimeError("No OpenClaw function tool schemas are available.")
+        discovery_tool_schemas = _filter_native_discovery_tool_schemas(tool_schemas)
 
         transcript: list[str] = []
         executed_calls: list[dict[str, Any]] = []
@@ -278,18 +353,33 @@ class CampaignOrchestrator:
         pending_input_items: list[dict[str, Any]] | None = None
 
         for round_index in range(1, rounds + 1):
+            base_input_items: list[dict[str, Any]] = []
+            turn_user_input = objective if pending_input_items is None else ""
+            if pending_input_items is None and self._evidence_items:
+                base_input_items.append({"type": "input_text", "text": objective})
+                turn_user_input = ""
+            if pending_input_items:
+                base_input_items.extend(pending_input_items)
+            turn_tool_schemas = tool_schemas
+            if (
+                round_index <= self._native_discovery_bootstrap_rounds
+                and discovery_tool_schemas
+            ):
+                turn_tool_schemas = discovery_tool_schemas
             request_kwargs = self._openclaw_request_kwargs(
                 phase="native-tool-loop",
+                objective=objective,
+                allow_evidence=(pending_input_items is None),
                 metadata_extra={"round": str(round_index)},
+                previous_response_id=previous_response_id,
+                input_items=base_input_items or None,
             )
             response = self._openclaw.create_response(
-                user_input=objective if pending_input_items is None else "",
-                input_items=pending_input_items,
+                user_input=turn_user_input,
                 instructions=system_prompt.strip(),
-                tools=tool_schemas,
+                tools=turn_tool_schemas,
                 tool_choice="auto",
                 parallel_tool_calls=False,
-                previous_response_id=previous_response_id,
                 **request_kwargs,
             )
             if response.text.strip():
@@ -302,7 +392,20 @@ class CampaignOrchestrator:
 
             pending_input_items = []
             for call in response.function_calls:
-                result = self._refua_mcp.execute_tool(call.name, call.arguments)
+                try:
+                    result = self._refua_mcp.execute_tool(call.name, call.arguments)
+                except Exception as exc:  # noqa: BLE001
+                    if self._native_tool_fail_fast:
+                        raise
+                    result = ToolExecutionResult(
+                        tool=call.name,
+                        args=dict(call.arguments),
+                        output={
+                            "error": str(exc),
+                            "failed_tool": call.name,
+                            "recoverable": True,
+                        },
+                    )
                 results.append(result)
                 executed_calls.append({"tool": result.tool, "args": result.args})
                 pending_input_items.append(
@@ -312,6 +415,20 @@ class CampaignOrchestrator:
                         "output": json.dumps(result.output, ensure_ascii=True),
                     }
                 )
+                if self._auto_web_fetch and result.tool == "web_search":
+                    expanded, generated = expand_results_with_web_fetch(
+                        results=results,
+                        execute_tool=self._refua_mcp.execute_tool,
+                        max_urls=self._auto_web_fetch_max_urls,
+                        max_chars=self._auto_web_fetch_max_chars,
+                    )
+                    if generated > 0:
+                        new_items = expanded[len(results) :]
+                        results = expanded
+                        for generated_item in new_items:
+                            executed_calls.append(
+                                {"tool": generated_item.tool, "args": generated_item.args}
+                            )
         else:
             transcript.append(
                 f"Native tool loop reached max_rounds={rounds} before completion."
@@ -664,3 +781,22 @@ def _build_default_objective_fallback_plan(
 def _is_all_disease_objective(objective: str) -> bool:
     lowered = objective.lower()
     return any(token in lowered for token in _ALL_DISEASE_OBJECTIVE_HINTS)
+
+
+def _filter_native_discovery_tool_schemas(
+    tool_schemas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    discovery_names = {"web_search", "web_fetch"}
+    filtered: list[dict[str, Any]] = []
+    for item in tool_schemas:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip() != "function":
+            continue
+        function_block = item.get("function")
+        if not isinstance(function_block, dict):
+            continue
+        name = str(function_block.get("name") or "").strip()
+        if name in discovery_names:
+            filtered.append(item)
+    return filtered

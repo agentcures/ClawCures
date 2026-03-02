@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
@@ -43,6 +43,9 @@ class OpenClawClient:
         parallel_tool_calls: bool | None = None,
         previous_response_id: str | None = None,
         input_items: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        stream: bool | None = None,
+        on_stream_text: Callable[[str], None] | None = None,
     ) -> OpenClawResponse:
         input_payload: str | list[dict[str, Any]]
         if input_items is not None:
@@ -51,7 +54,7 @@ class OpenClawClient:
             input_payload = user_input
 
         payload: dict[str, Any] = {
-            "model": self._config.model,
+            "model": (model or self._config.model),
             "input": input_payload,
             "instructions": instructions,
         }
@@ -69,8 +72,16 @@ class OpenClawClient:
             payload["parallel_tool_calls"] = bool(parallel_tool_calls)
         if previous_response_id:
             payload["previous_response_id"] = previous_response_id
+        stream_enabled = bool(stream)
+        if stream is not None:
+            payload["stream"] = stream_enabled
 
-        response_json = self._post_json("/v1/responses", payload)
+        response_json = self._post_json(
+            "/v1/responses",
+            payload,
+            stream=stream_enabled,
+            on_stream_text=on_stream_text,
+        )
         function_calls = _extract_function_calls(response_json)
         return OpenClawResponse(
             raw=response_json,
@@ -79,7 +90,14 @@ class OpenClawClient:
             function_calls=function_calls,
         )
 
-    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        stream: bool = False,
+        on_stream_text: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
         url = urljoin(self._config.base_url.rstrip("/") + "/", path.lstrip("/"))
 
@@ -93,6 +111,11 @@ class OpenClawClient:
         request = Request(url, data=body, headers=headers, method="POST")
         try:
             with urlopen(request, timeout=self._config.timeout_seconds) as response:
+                if stream:
+                    return _parse_streaming_response(
+                        response,
+                        on_stream_text=on_stream_text,
+                    )
                 content = response.read().decode("utf-8")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -112,6 +135,58 @@ class OpenClawClient:
                 "OpenClaw API returned an unexpected response envelope type."
             )
         return parsed
+
+
+def _parse_streaming_response(
+    response: Any,
+    *,
+    on_stream_text: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    final_payload: dict[str, Any] | None = None
+    output_text_chunks: list[str] = []
+
+    for raw_line in response:
+        try:
+            line = raw_line.decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        stripped = line.strip()
+        if not stripped or not stripped.startswith("data:"):
+            continue
+        event_payload = stripped[5:].strip()
+        if not event_payload or event_payload == "[DONE]":
+            continue
+        try:
+            parsed_event = json.loads(event_payload)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed_event, dict):
+            continue
+
+        response_block = parsed_event.get("response")
+        if isinstance(response_block, dict):
+            final_payload = response_block
+
+        event_type = str(parsed_event.get("type") or "").strip().lower()
+        if event_type in {"response.output_text.delta", "response.output_text"}:
+            delta = parsed_event.get("delta")
+            if not isinstance(delta, str):
+                delta = parsed_event.get("text")
+            if isinstance(delta, str) and delta:
+                output_text_chunks.append(delta)
+                if on_stream_text is not None:
+                    on_stream_text(delta)
+
+    if final_payload is not None:
+        if output_text_chunks and not final_payload.get("output_text"):
+            final_payload = dict(final_payload)
+            final_payload["output_text"] = "".join(output_text_chunks)
+        return final_payload
+
+    if output_text_chunks:
+        return {"output_text": "".join(output_text_chunks), "output": []}
+
+    raise RuntimeError("OpenClaw streaming response did not include a terminal payload.")
 
 
 def _extract_response_id(payload: dict[str, Any]) -> str | None:

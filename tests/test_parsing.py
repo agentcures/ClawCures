@@ -5,7 +5,12 @@ from types import MethodType
 import pytest
 
 from refua_campaign.config import OpenClawConfig
-from refua_campaign.openclaw_client import OpenClawClient, _extract_function_calls, _extract_response_text
+from refua_campaign.openclaw_client import (
+    OpenClawClient,
+    _extract_function_calls,
+    _extract_response_text,
+    _parse_streaming_response,
+)
 from refua_campaign.orchestrator import _extract_json_plan
 
 
@@ -127,9 +132,18 @@ def test_create_response_forwards_optional_openclaw_fields() -> None:
     client = OpenClawClient(config)
     captured: dict[str, object] = {}
 
-    def fake_post_json(self: OpenClawClient, path: str, payload: dict[str, object]) -> dict[str, object]:
+    def fake_post_json(
+        self: OpenClawClient,
+        path: str,
+        payload: dict[str, object],
+        *,
+        stream: bool = False,
+        on_stream_text=None,
+    ) -> dict[str, object]:
         captured["path"] = path
         captured["payload"] = payload
+        captured["stream"] = stream
+        captured["on_stream_text"] = on_stream_text
         return {
             "id": "resp_2",
             "output_text": "done",
@@ -170,6 +184,63 @@ def test_create_response_forwards_optional_openclaw_fields() -> None:
     assert payload["user"] == "campaign-main"
     assert payload["store"] is True
     assert payload["previous_response_id"] == "resp_1"
+    assert captured["stream"] is False
     assert response.response_id == "resp_2"
     assert len(response.function_calls) == 1
     assert response.function_calls[0].name == "web_search"
+
+
+def test_parse_streaming_response_builds_terminal_payload_and_text_chunks() -> None:
+    class _FakeResponse:
+        def __iter__(self):
+            yield b'data: {"type":"response.output_text.delta","delta":"Hello "}\n'
+            yield b'data: {"type":"response.output_text.delta","delta":"World"}\n'
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_9","output":[]}}\n'
+            )
+            yield b"data: [DONE]\n"
+
+    chunks: list[str] = []
+    payload = _parse_streaming_response(_FakeResponse(), on_stream_text=chunks.append)
+    assert payload["id"] == "resp_9"
+    assert payload["output_text"] == "Hello World"
+    assert "".join(chunks) == "Hello World"
+
+
+def test_create_response_forwards_model_override_and_stream_flag() -> None:
+    config = OpenClawConfig(
+        base_url="http://localhost:12345",
+        model="openclaw:default",
+        timeout_seconds=10.0,
+        bearer_token=None,
+    )
+    client = OpenClawClient(config)
+    captured: dict[str, object] = {}
+
+    def fake_post_json(
+        self: OpenClawClient,
+        path: str,
+        payload: dict[str, object],
+        *,
+        stream: bool = False,
+        on_stream_text=None,
+    ) -> dict[str, object]:
+        captured["path"] = path
+        captured["payload"] = payload
+        captured["stream"] = stream
+        captured["on_stream_text"] = on_stream_text
+        return {"id": "resp_3", "output_text": "ok"}
+
+    client._post_json = MethodType(fake_post_json, client)  # type: ignore[method-assign]
+    response = client.create_response(
+        user_input="test",
+        instructions="instr",
+        model="openclaw:oncology-planner",
+        stream=True,
+    )
+    assert response.response_id == "resp_3"
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["model"] == "openclaw:oncology-planner"
+    assert payload["stream"] is True
+    assert captured["stream"] is True
