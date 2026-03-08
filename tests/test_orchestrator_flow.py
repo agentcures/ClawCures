@@ -363,6 +363,54 @@ def test_orchestrator_plan_applies_agent_routing_and_evidence_items() -> None:
     assert any(item.get("text") == "paper evidence" for item in call.kwargs["input_items"])
 
 
+def test_orchestrator_plan_uses_planner_tool_override() -> None:
+    openclaw = _FakeOpenClawClient(
+        responses=[
+            '{"calls":[{"tool":"web_search","args":{"query":"KRAS G12D inhibitor evidence","count":3}}]}',
+        ]
+    )
+    adapter = _FakeAdapter(["web_search", "refua_preclinical_plan"])
+    orchestrator = CampaignOrchestrator(
+        openclaw=openclaw,
+        refua_mcp=adapter,
+        planner_tools=["web_search"],
+    )
+
+    _planner_text, plan = orchestrator.plan(
+        objective="Find KRAS G12D evidence.",
+        system_prompt="Return strict JSON plans.",
+    )
+
+    assert plan["calls"][0]["tool"] == "web_search"
+    call = openclaw.calls[0]
+    assert "Allowed tools: web_search." in call.instructions
+    assert "refua_preclinical_plan" not in call.instructions
+
+
+def test_orchestrator_plan_uses_targeted_fallback_after_planner_failure() -> None:
+    class _FailingOpenClawClient:
+        def create_response(self, **_kwargs: Any) -> OpenClawResponse:
+            raise RuntimeError("timed out")
+
+    adapter = _FakeAdapter(["web_search", "refua_validate_spec", "refua_affinity"])
+    orchestrator = CampaignOrchestrator(
+        openclaw=_FailingOpenClawClient(),  # type: ignore[arg-type]
+        refua_mcp=adapter,
+        planner_tools=["web_search", "refua_validate_spec", "refua_affinity"],
+    )
+
+    planner_text, plan = orchestrator.plan(
+        objective="Find promising drugs for KRAS G12D.",
+        system_prompt="Return strict JSON plans.",
+    )
+
+    assert "Planner fallback plan was used" in planner_text
+    tools = [call["tool"] for call in plan["calls"]]
+    assert "web_search" in tools
+    assert "refua_validate_spec" in tools
+    assert "refua_affinity" in tools
+
+
 def test_orchestrator_native_tool_loop_uses_parallel_execution_for_safe_calls() -> None:
     openclaw = _FakeNativeOpenClawClient(
         responses=[

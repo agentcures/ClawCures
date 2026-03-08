@@ -29,6 +29,52 @@ _TOOL_ALIAS_MAP: dict[str, str] = {
     "websearch": "web_search",
     "webfetch": "web_fetch",
 }
+_ENTITY_REQUIRED_TOOLS = frozenset(
+    {"refua_validate_spec", "refua_fold", "refua_affinity"}
+)
+_PROTEIN_SEQUENCE_ALIASES: tuple[str, ...] = (
+    "sequence",
+    "target_sequence",
+    "protein_sequence",
+    "receptor_sequence",
+    "antigen_sequence",
+)
+_PROTEIN_ID_ALIASES: tuple[str, ...] = (
+    "protein_id",
+    "target_id",
+)
+_LIGAND_SMILES_ALIASES: tuple[str, ...] = (
+    "smiles",
+    "ligand_smiles",
+    "compound_smiles",
+    "candidate_smiles",
+    "binder_smiles",
+    "molecule_smiles",
+)
+_LIGAND_CCD_ALIASES: tuple[str, ...] = (
+    "ccd",
+    "ligand_ccd",
+    "compound_ccd",
+    "candidate_ccd",
+    "binder_ccd",
+)
+_LIGAND_ID_ALIASES: tuple[str, ...] = (
+    "ligand_id",
+    "compound_id",
+    "candidate_id",
+    "binder_id",
+    "ligand_name",
+    "compound_name",
+    "candidate_name",
+    "binder_name",
+    "ligand",
+    "compound",
+    "candidate",
+    "binder",
+    "molecule",
+)
+_PROTEIN_CONTAINER_KEYS: tuple[str, ...] = ("protein", "target", "receptor", "antigen")
+_LIGAND_CONTAINER_KEYS: tuple[str, ...] = ("ligand", "compound", "candidate", "binder")
 _MISSION_TARGET_DISCOVERY_QUERIES: tuple[dict[str, str], ...] = (
     {
         "disease_slug": "ischemic_heart_disease",
@@ -130,6 +176,26 @@ _MISSION_BOOTSTRAP_PROGRAMS: tuple[dict[str, str], ...] = (
         "smiles": "COC1=CC2=C(C=C1)C(CC3=CC=CC=C3)N(CC4=CC=CC=C4)CC2",
     },
 )
+_KRAS_G12D_BOOTSTRAP_PLAN: dict[str, Any] = {
+    "objective_hints": ("kras", "g12d"),
+    "target_sequence": (
+        "GMTEYKLVVVGADGVGKSALTIQLIQNHFVDEYDPTIEDSYRKQVVIDGETSLLDILDTAGQEEYSAMRDQYMRTGEGF"
+        "LLVFAINNTKSFEDIHHYREQIKRVKDSEDVPMVLVGNKSDLPSRTVDTKQAQDLARSYGIPFIETSAKTRQGVDDAFYTL"
+        "VREIRKHKEK"
+    ),
+    "smiles": (
+        "Oc1cc2ccc(F)c(C#C)c2c(c1)c3ncc4c("
+        "nc(OC[C@@]56CCCN5C[C@H](F)C6)nc4c3F)N7C[C@H]8CC[C@@H](C7)N8"
+    ),
+    "evidence_queries": (
+        "KRAS G12D MRTX-1133 preclinical evidence",
+        "KRAS G12D inhibitor MRTX-1133 structure 7RPZ",
+    ),
+    "evidence_urls": (
+        "https://www.rcsb.org/structure/7RPZ",
+        "https://www.cancer.gov/research/key-initiatives/ras/news-events/dialogue-blog/2022/kemp-kras-still-leading-cancer-target",
+    ),
+}
 
 
 def _stderr_stream_callback(chunk: str) -> None:
@@ -177,6 +243,7 @@ class CampaignOrchestrator:
         stream_responses: bool = False,
         stream_to_stderr: bool = False,
         evidence_items: list[dict[str, Any]] | None = None,
+        planner_tools: list[str] | None = None,
         native_discovery_bootstrap_rounds: int = 0,
         native_tool_fail_fast: bool = False,
         native_parallel_tool_calls: bool = True,
@@ -195,6 +262,16 @@ class CampaignOrchestrator:
         self._stream_responses = bool(stream_responses)
         self._stream_to_stderr = bool(stream_to_stderr)
         self._evidence_items = list(evidence_items or [])
+        normalized_planner_tools = [
+            str(name).strip()
+            for name in (planner_tools or [])
+            if isinstance(name, str) and str(name).strip()
+        ]
+        self._planner_tools = (
+            sorted(dict.fromkeys(normalized_planner_tools))
+            if normalized_planner_tools
+            else None
+        )
         self._native_discovery_bootstrap_rounds = max(
             0,
             int(native_discovery_bootstrap_rounds),
@@ -251,7 +328,7 @@ class CampaignOrchestrator:
         return kwargs
 
     def plan(self, *, objective: str, system_prompt: str) -> tuple[str, dict[str, Any]]:
-        allowed_tools = self._refua_mcp.available_tools()
+        allowed_tools = list(self._planner_tools or self._refua_mcp.available_tools())
         instructions = (
             system_prompt.strip()
             + "\n\n"
@@ -259,6 +336,7 @@ class CampaignOrchestrator:
         )
         attempt_texts: list[str] = []
         last_error: ValueError | None = None
+        planner_failure: Exception | None = None
 
         for attempt in range(1, self._max_plan_attempts + 1):
             if attempt == 1:
@@ -287,11 +365,15 @@ class CampaignOrchestrator:
                     metadata_extra={"attempt": str(attempt)},
                 )
 
-            response = self._openclaw.create_response(
-                user_input=user_input,
-                instructions=attempt_instructions,
-                **request_kwargs,
-            )
+            try:
+                response = self._openclaw.create_response(
+                    user_input=user_input,
+                    instructions=attempt_instructions,
+                    **request_kwargs,
+                )
+            except Exception as exc:  # noqa: BLE001
+                planner_failure = exc
+                break
             attempt_texts.append(response.text)
 
             try:
@@ -306,15 +388,20 @@ class CampaignOrchestrator:
         )
         if fallback_plan is not None:
             fallback_message = (
-                "Planner fallback plan was used after JSON/tool validation failures."
+                "Planner fallback plan was used after planner failure or "
+                "JSON/tool validation failures."
             )
             if last_error is not None:
                 fallback_message += f" Last error: {last_error}"
+            if planner_failure is not None:
+                fallback_message += f" Planner failure: {planner_failure}"
             fallback_text = "\n\n".join([*attempt_texts, fallback_message]).strip()
             return fallback_text, fallback_plan
 
         if last_error is not None:
             raise last_error
+        if planner_failure is not None:
+            raise planner_failure
         raise ValueError("Planner failed without producing a valid plan.")
 
     def plan_and_execute(self, *, objective: str, system_prompt: str) -> CampaignRun:
@@ -508,6 +595,7 @@ def _extract_json_plan(
         return plan
 
     canonical = _canonicalize_plan_tools(plan, allowed_tools=allowed_tools)
+    canonical = _enrich_plan_call_shapes(canonical)
     _validate_plan_tools(canonical, allowed_tools=allowed_tools)
     _validate_plan_call_shapes(canonical)
     return canonical
@@ -654,6 +742,193 @@ def _canonicalize_tool_name(tool: str, *, allowed_tools: list[str]) -> str:
     return normalized
 
 
+def _enrich_plan_call_shapes(plan: dict[str, Any]) -> dict[str, Any]:
+    calls = plan.get("calls")
+    if not isinstance(calls, list):
+        return plan
+
+    normalized_calls: list[dict[str, Any]] = []
+    last_entities: Any = None
+    entities_by_name: dict[str, Any] = {}
+    for entry in calls:
+        if not isinstance(entry, dict):
+            normalized_calls.append(entry)
+            continue
+
+        tool = entry.get("tool")
+        args = entry.get("args")
+        if not isinstance(tool, str) or not isinstance(args, dict):
+            normalized_calls.append(entry)
+            continue
+
+        enriched_args = dict(args)
+        if tool in _ENTITY_REQUIRED_TOOLS and "entities" not in enriched_args:
+            inferred_entities = _infer_plan_entities(
+                enriched_args,
+                last_entities=last_entities,
+                entities_by_name=entities_by_name,
+            )
+            if inferred_entities is not None:
+                enriched_args["entities"] = inferred_entities
+
+        current_entities = enriched_args.get("entities")
+        if current_entities is not None:
+            last_entities = current_entities
+            name_key = _plan_name_key(enriched_args.get("name"))
+            if name_key is not None:
+                entities_by_name[name_key] = current_entities
+
+        normalized_calls.append({"tool": tool, "args": enriched_args})
+
+    return {"calls": normalized_calls}
+
+
+def _infer_plan_entities(
+    args: dict[str, Any],
+    *,
+    last_entities: Any,
+    entities_by_name: dict[str, Any],
+) -> Any | None:
+    direct = _infer_entities_from_args(args)
+    if direct is not None:
+        return direct
+
+    name_key = _plan_name_key(args.get("name"))
+    if name_key is not None:
+        mapped = entities_by_name.get(name_key)
+        if mapped is not None:
+            return mapped
+
+    if last_entities is not None:
+        return last_entities
+    return None
+
+
+def _infer_entities_from_args(args: dict[str, Any]) -> list[dict[str, Any]] | None:
+    protein = _infer_protein_entity(args)
+    ligand = _infer_ligand_entity(args)
+    if protein is None and ligand is None:
+        return None
+
+    entities: list[dict[str, Any]] = []
+    if protein is not None:
+        entities.append(protein)
+    if ligand is not None:
+        entities.append(ligand)
+    return entities
+
+
+def _infer_protein_entity(args: dict[str, Any]) -> dict[str, Any] | None:
+    sequence = _pick_string(args, _PROTEIN_SEQUENCE_ALIASES)
+    identifier = _pick_string(args, _PROTEIN_ID_ALIASES, fallback="A")
+    if sequence is not None:
+        return {
+            "type": "protein",
+            "id": identifier,
+            "sequence": sequence,
+        }
+
+    for key in _PROTEIN_CONTAINER_KEYS:
+        nested = args.get(key)
+        if isinstance(nested, dict):
+            entity = _protein_entity_from_mapping(nested, default_id="A")
+            if entity is not None:
+                return entity
+    return None
+
+
+def _infer_ligand_entity(args: dict[str, Any]) -> dict[str, Any] | None:
+    smiles = _pick_string(args, _LIGAND_SMILES_ALIASES)
+    ccd = _pick_string(args, _LIGAND_CCD_ALIASES)
+    identifier = _pick_string(args, _LIGAND_ID_ALIASES, fallback="lig")
+    if smiles is not None or ccd is not None:
+        entity: dict[str, Any] = {
+            "type": "ligand",
+            "id": identifier,
+        }
+        if smiles is not None:
+            entity["smiles"] = smiles
+        else:
+            entity["ccd"] = ccd
+        return entity
+
+    for key in _LIGAND_CONTAINER_KEYS:
+        nested = args.get(key)
+        if isinstance(nested, dict):
+            entity = _ligand_entity_from_mapping(nested, default_id=key)
+            if entity is not None:
+                return entity
+    return None
+
+
+def _protein_entity_from_mapping(
+    payload: dict[str, Any],
+    *,
+    default_id: str,
+) -> dict[str, Any] | None:
+    sequence = _pick_string(payload, _PROTEIN_SEQUENCE_ALIASES)
+    if sequence is None:
+        return None
+    return {
+        "type": "protein",
+        "id": _pick_string(payload, _PROTEIN_ID_ALIASES, fallback=default_id),
+        "sequence": sequence,
+    }
+
+
+def _ligand_entity_from_mapping(
+    payload: dict[str, Any],
+    *,
+    default_id: str,
+) -> dict[str, Any] | None:
+    smiles = _pick_string(payload, _LIGAND_SMILES_ALIASES)
+    ccd = _pick_string(payload, _LIGAND_CCD_ALIASES)
+    if smiles is None and ccd is None:
+        return None
+    entity: dict[str, Any] = {
+        "type": "ligand",
+        "id": _pick_string(payload, _LIGAND_ID_ALIASES, fallback=default_id),
+    }
+    if smiles is not None:
+        entity["smiles"] = smiles
+    else:
+        entity["ccd"] = ccd
+    return entity
+
+
+def _pick_string(
+    payload: dict[str, Any],
+    keys: tuple[str, ...],
+    *,
+    fallback: str | None = None,
+) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return fallback
+
+
+def _plan_name_key(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    for suffix in (
+        "_validate_spec",
+        "_validation",
+        "_validated",
+        "_affinity",
+        "_fold",
+        "_bootstrap",
+    ):
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)]
+            break
+    return normalized or None
+
+
 def _validate_plan_tools(plan: dict[str, Any], *, allowed_tools: list[str]) -> None:
     calls = plan.get("calls")
     if not isinstance(calls, list):
@@ -694,7 +969,7 @@ def _validate_plan_call_shapes(plan: dict[str, Any]) -> None:
         if not isinstance(args, dict):
             raise ValueError(f"Planner call #{index} args must be an object.")
 
-        if tool in {"refua_validate_spec", "refua_fold", "refua_affinity"}:
+        if tool in _ENTITY_REQUIRED_TOOLS:
             if "entities" not in args:
                 raise ValueError(
                     f"Planner call #{index} for {tool} must include 'entities'."
@@ -789,6 +1064,12 @@ def _build_default_objective_fallback_plan(
     objective: str,
     allowed_tools: list[str],
 ) -> dict[str, Any] | None:
+    targeted_plan = _build_targeted_objective_fallback_plan(
+        objective=objective,
+        allowed_tools=allowed_tools,
+    )
+    if targeted_plan is not None:
+        return targeted_plan
     if not _is_all_disease_objective(objective):
         return None
     allowed_set = set(allowed_tools)
@@ -918,6 +1199,97 @@ def _build_default_objective_fallback_plan(
 def _is_all_disease_objective(objective: str) -> bool:
     lowered = objective.lower()
     return any(token in lowered for token in _ALL_DISEASE_OBJECTIVE_HINTS)
+
+
+def _build_targeted_objective_fallback_plan(
+    *,
+    objective: str,
+    allowed_tools: list[str],
+) -> dict[str, Any] | None:
+    lowered = objective.lower()
+    objective_hints = _KRAS_G12D_BOOTSTRAP_PLAN["objective_hints"]
+    if not all(token in lowered for token in objective_hints):
+        return None
+
+    allowed_set = set(allowed_tools)
+    calls: list[dict[str, Any]] = []
+
+    if "web_search" in allowed_set:
+        for query in _KRAS_G12D_BOOTSTRAP_PLAN["evidence_queries"]:
+            calls.append(
+                {
+                    "tool": "web_search",
+                    "args": {
+                        "query": query,
+                        "count": 5,
+                    },
+                }
+            )
+
+    if "web_fetch" in allowed_set:
+        for url in _KRAS_G12D_BOOTSTRAP_PLAN["evidence_urls"]:
+            calls.append(
+                {
+                    "tool": "web_fetch",
+                    "args": {
+                        "url": url,
+                        "extract_mode": "text",
+                        "max_chars": 12000,
+                    },
+                }
+            )
+
+    entities = [
+        {
+            "type": "protein",
+            "id": "A",
+            "sequence": _KRAS_G12D_BOOTSTRAP_PLAN["target_sequence"],
+        },
+        {
+            "type": "ligand",
+            "id": "candidate",
+            "smiles": _KRAS_G12D_BOOTSTRAP_PLAN["smiles"],
+        },
+    ]
+    program_name = "kras_g12d_mrtx1133"
+
+    if "refua_validate_spec" in allowed_set:
+        calls.append(
+            {
+                "tool": "refua_validate_spec",
+                "args": {
+                    "name": f"{program_name}_validate",
+                    "action": "affinity",
+                    "deep_validate": False,
+                    "entities": entities,
+                },
+            }
+        )
+
+    if "refua_affinity" in allowed_set:
+        calls.append(
+            {
+                "tool": "refua_affinity",
+                "args": {
+                    "name": f"{program_name}_affinity",
+                    "entities": entities,
+                    "binder": "candidate",
+                },
+            }
+        )
+    elif "refua_fold" in allowed_set:
+        calls.append(
+            {
+                "tool": "refua_fold",
+                "args": {
+                    "name": f"{program_name}_fold",
+                    "entities": entities,
+                    "affinity": {"binder": "candidate"},
+                },
+            }
+        )
+
+    return {"calls": calls} if calls else None
 
 
 def _filter_native_discovery_tool_schemas(

@@ -26,6 +26,14 @@ def planner_suffix(allowed_tools: list[str]) -> str:
             " Prefer a staged progression: evidence tools -> refua_validate_spec -> "
             "design/affinity tools -> ADMET/clinical simulation where available."
         )
+    entity_guidance = ""
+    if {"refua_validate_spec", "refua_fold", "refua_affinity"} & allowed:
+        entity_guidance = (
+            " For refua_validate_spec, refua_fold, and refua_affinity, always include "
+            '"entities" as typed objects, for example '
+            '{"entities":[{"type":"protein","id":"A","sequence":"MKTAYI"},'
+            '{"type":"ligand","id":"lig","smiles":"CCO"}]}.'
+        )
     citation_guidance = (
         " Include evidence-bearing calls (web_search/web_fetch or refua_data_*) before "
         "high-cost hypothesis calls, and preserve source URLs in arguments/results."
@@ -36,6 +44,7 @@ def planner_suffix(allowed_tools: list[str]) -> str:
         f"Allowed tools: {tools}. "
         + web_guidance
         + stage_guidance
+        + entity_guidance
         + citation_guidance
         + " "
         "Never emit markdown, prose, or comments."

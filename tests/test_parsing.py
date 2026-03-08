@@ -60,6 +60,37 @@ def test_extract_json_plan_requires_entities_for_validate_spec_when_allowed() ->
         _extract_json_plan(text, allowed_tools=["refua_validate_spec"])
 
 
+def test_extract_json_plan_infers_entities_from_sequence_and_smiles() -> None:
+    text = (
+        '{"calls":[{"tool":"refua_affinity","args":{"target_sequence":"MKTAYI",'
+        '"ligand_smiles":"CCO","binder":"candidate"}}]}'
+    )
+    plan = _extract_json_plan(text, allowed_tools=["refua_affinity"])
+    assert plan["calls"][0]["args"]["entities"] == [
+        {"type": "protein", "id": "A", "sequence": "MKTAYI"},
+        {"type": "ligand", "id": "candidate", "smiles": "CCO"},
+    ]
+
+
+def test_extract_json_plan_reuses_entities_from_prior_validate_spec() -> None:
+    text = (
+        '{"calls":['
+        '{"tool":"refua_validate_spec","args":{"name":"kras_g12d_candidate_bootstrap",'
+        '"entities":[{"type":"protein","id":"target","sequence":"MKTAYI"},'
+        '{"type":"ligand","id":"candidate","smiles":"CCO"}]}},'
+        '{"tool":"refua_affinity","args":{"name":"kras_g12d_candidate_affinity","binder":"candidate"}}'
+        "]} "
+    )
+    plan = _extract_json_plan(
+        text,
+        allowed_tools=["refua_validate_spec", "refua_affinity"],
+    )
+    assert plan["calls"][1]["args"]["entities"] == [
+        {"type": "protein", "id": "target", "sequence": "MKTAYI"},
+        {"type": "ligand", "id": "candidate", "smiles": "CCO"},
+    ]
+
+
 def test_extract_json_plan_requires_job_id_for_refua_job_when_allowed() -> None:
     text = '{"calls":[{"tool":"refua_job","args":{"action":"create_program"}}]}'
     with pytest.raises(ValueError, match="expects a 'job_id'"):
