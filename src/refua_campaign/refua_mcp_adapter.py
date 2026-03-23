@@ -505,13 +505,19 @@ class RefuaMcpAdapter:
             )
         return tools
 
-    def execute_plan(self, plan: dict[str, Any]) -> list[ToolExecutionResult]:
+    def execute_plan(
+        self,
+        plan: dict[str, Any],
+        *,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[ToolExecutionResult]:
         calls = plan.get("calls")
         if not isinstance(calls, list):
             raise ValueError("Plan must contain a 'calls' list.")
 
         results: list[ToolExecutionResult] = []
-        for entry in calls:
+        total_calls = len(calls)
+        for index, entry in enumerate(calls, start=1):
             if not isinstance(entry, dict):
                 raise ValueError("Each plan call must be an object.")
             tool = entry.get("tool")
@@ -520,7 +526,45 @@ class RefuaMcpAdapter:
                 raise ValueError("Each plan call must define a non-empty 'tool'.")
             if not isinstance(args, dict):
                 raise ValueError("Each plan call 'args' must be an object.")
-            results.append(self.execute_tool(tool, args))
+            normalized_tool = tool.strip()
+            normalized_args = dict(args)
+            if event_callback is not None:
+                event_callback(
+                    {
+                        "event_type": "tool_started",
+                        "tool": normalized_tool,
+                        "args": normalized_args,
+                        "call_index": index,
+                        "total_calls": total_calls,
+                    }
+                )
+            try:
+                result = self.execute_tool(normalized_tool, normalized_args)
+            except Exception as exc:
+                if event_callback is not None:
+                    event_callback(
+                        {
+                            "event_type": "tool_failed",
+                            "tool": normalized_tool,
+                            "args": normalized_args,
+                            "call_index": index,
+                            "total_calls": total_calls,
+                            "error": str(exc),
+                        }
+                    )
+                raise
+            results.append(result)
+            if event_callback is not None:
+                event_callback(
+                    {
+                        "event_type": "tool_completed",
+                        "tool": normalized_tool,
+                        "args": normalized_args,
+                        "call_index": index,
+                        "total_calls": total_calls,
+                        "output": _to_plain_data(result.output),
+                    }
+                )
         return results
 
 
