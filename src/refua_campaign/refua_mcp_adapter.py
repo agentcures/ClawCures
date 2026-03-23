@@ -550,10 +550,51 @@ def _web_search(
     if brave_key:
         return _web_search_brave(query=query_value, count=count_value, api_key=brave_key)
 
-    instant = _web_search_duckduckgo(query=query_value, count=count_value)
+    instant_error: str | None = None
+    try:
+        instant = _web_search_duckduckgo(query=query_value, count=count_value)
+    except Exception as exc:  # noqa: BLE001
+        instant_error = str(exc)
+        instant = {
+            "provider": "duckduckgo_instant_answer",
+            "query": query_value,
+            "requested_count": count_value,
+            "count": 0,
+            "results": [],
+            "warning": f"DuckDuckGo Instant Answer failed: {instant_error}",
+        }
     if _has_web_results(instant):
         return instant
-    return _web_search_duckduckgo_html(query=query_value, count=count_value)
+
+    try:
+        html_payload = _web_search_duckduckgo_html(query=query_value, count=count_value)
+    except Exception as exc:  # noqa: BLE001
+        warnings: list[str] = []
+        if instant_error:
+            warnings.append(
+                f"DuckDuckGo Instant Answer failed: {instant_error}"
+            )
+        warnings.append(f"DuckDuckGo HTML search failed: {exc}")
+        return {
+            "provider": "duckduckgo_html",
+            "query": query_value,
+            "requested_count": count_value,
+            "count": 0,
+            "results": [],
+            "warning": " ".join(warnings),
+        }
+
+    if instant_error:
+        prior_warning = str(html_payload.get("warning") or "").strip()
+        html_payload["warning"] = " ".join(
+            item
+            for item in (
+                f"DuckDuckGo Instant Answer failed: {instant_error}",
+                prior_warning,
+            )
+            if item
+        )
+    return html_payload
 
 
 def _web_fetch(

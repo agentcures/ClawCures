@@ -73,6 +73,43 @@ def test_web_search_falls_back_to_duckduckgo_html_when_instant_answer_is_empty(
     assert payload["results"][0]["url"] == "https://example.org/egfr"
 
 
+def test_web_search_falls_back_to_duckduckgo_html_when_instant_answer_is_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    monkeypatch.delenv("TOOLS_WEB_SEARCH_API_KEY", raising=False)
+
+    def _raise_invalid_json(*, query: str, count: int) -> dict[str, object]:
+        raise RuntimeError(
+            "Expected JSON response from https://api.duckduckgo.com/?q=test."
+        )
+
+    monkeypatch.setattr(adapter, "_web_search_duckduckgo", _raise_invalid_json)
+    monkeypatch.setattr(
+        adapter,
+        "_web_search_duckduckgo_html",
+        lambda *, query, count: {
+            "provider": "duckduckgo_html",
+            "query": query,
+            "requested_count": count,
+            "count": 1,
+            "results": [
+                {
+                    "title": "PCSK9 review",
+                    "url": "https://example.org/pcsk9",
+                    "snippet": "PCSK9 is a validated lipid-lowering target.",
+                }
+            ],
+            "warning": "BRAVE_API_KEY not configured; using DuckDuckGo HTML fallback.",
+        },
+    )
+
+    payload = adapter._web_search(query="ischemic heart disease targets", count=3)
+    assert payload["provider"] == "duckduckgo_html"
+    assert payload["results"][0]["url"] == "https://example.org/pcsk9"
+    assert "Instant Answer failed" in payload["warning"]
+
+
 def test_parse_duckduckgo_html_results_decodes_redirect_urls() -> None:
     html_payload = """
     <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fpaper&amp;rut=abc">
