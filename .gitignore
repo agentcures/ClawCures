@@ -25,4 +25,3 @@ artifacts/
 .artifacts/
 
 .DS_Store
-poetry.toml
