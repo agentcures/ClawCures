@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import socket
+from urllib.request import Request
+
 import pytest
 
 import refua_campaign.refua_mcp_adapter as adapter
@@ -25,6 +28,50 @@ def test_validate_fetch_url_allows_private_with_override(
 ) -> None:
     monkeypatch.setenv("CLAWCURES_ALLOW_PRIVATE_WEB_FETCH", "true")
     _validate_fetch_url("http://127.0.0.1:8080/status")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://2130706433/",
+        "http://0x7f000001/",
+        "http://127.1/",
+        "http://0177.0.0.1/",
+    ],
+)
+def test_validate_fetch_url_rejects_obfuscated_loopback(url: str) -> None:
+    with pytest.raises(ValueError, match="blocks localhost/private-network targets"):
+        _validate_fetch_url(url)
+
+
+def test_validate_fetch_url_rejects_hostname_that_resolves_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_getaddrinfo(
+        host: str,
+        _port: int | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        assert host == "internal.example"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(adapter.socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(ValueError, match="blocks localhost/private-network targets"):
+        _validate_fetch_url("http://internal.example/secret")
+
+
+def test_redirect_handler_rechecks_target() -> None:
+    handler = adapter._GuardedRedirectHandler()
+    with pytest.raises(ValueError, match="blocks localhost/private-network targets"):
+        handler.redirect_request(
+            Request("https://example.org/start"),
+            None,
+            302,
+            "Found",
+            {},
+            "http://127.0.0.1/admin",
+        )
 
 
 def test_web_search_falls_back_to_duckduckgo_html_when_instant_answer_is_empty(

@@ -25,7 +25,7 @@ from refua_campaign.clinical_trials import ClawCuresClinicalController
 from refua_campaign.config import CampaignRunConfig, OpenClawConfig
 from refua_campaign.evidence_quality import summarize_evidence_quality
 from refua_campaign.openclaw_client import OpenClawClient
-from refua_campaign.orchestrator import CampaignOrchestrator
+from refua_campaign.orchestrator import CampaignOrchestrator, _extract_json_plan
 from refua_campaign.portfolio import PortfolioWeights, rank_disease_programs
 from refua_campaign.promising_cures import (
     extract_promising_cures,
@@ -796,10 +796,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 plan = native_run.plan
                 results = native_run.results
             elif args.plan_file is not None:
-                plan_payload = json.loads(args.plan_file.read_text(encoding="utf-8"))
-                if not isinstance(plan_payload, dict):
-                    raise ValueError("--plan-file must contain a JSON object.")
-                plan = plan_payload
+                plan = _load_plan_file(
+                    args.plan_file,
+                    allowed_tools=adapter.available_tools(),
+                )
                 planner_text = "Loaded from --plan-file"
                 results = []
             else:
@@ -1052,9 +1052,10 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
     )
 
     if args.plan_file is not None:
-        plan_payload = json.loads(args.plan_file.read_text(encoding="utf-8"))
-        if not isinstance(plan_payload, dict):
-            raise ValueError("--plan-file must contain a JSON object.")
+        plan_payload = _load_plan_file(
+            args.plan_file,
+            allowed_tools=adapter.available_tools(),
+        )
         policy_check = evaluate_plan_policy(
             plan_payload,
             allowed_tools=adapter.available_tools(),
@@ -1233,11 +1234,34 @@ def _cmd_run_autonomous(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_validate_plan(args: argparse.Namespace) -> int:
-    plan_payload = json.loads(args.plan_file.read_text(encoding="utf-8"))
+def _load_plan_file(path: Path, *, allowed_tools: list[str]) -> dict[str, Any]:
+    plan_payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(plan_payload, dict):
         raise ValueError("--plan-file must contain a JSON object.")
+    loaded = _extract_json_plan(
+        json.dumps(plan_payload),
+        allowed_tools=allowed_tools,
+    )
+    return cast(dict[str, Any], loaded)
+
+
+def _cmd_validate_plan(args: argparse.Namespace) -> int:
     adapter, adapter_error = _build_adapter()
+    try:
+        plan_payload = _load_plan_file(
+            args.plan_file,
+            allowed_tools=adapter.available_tools(),
+        )
+    except ValueError as exc:
+        error_payload: dict[str, object] = {
+            "approved": False,
+            "errors": [str(exc)],
+            "warnings": [],
+        }
+        if adapter_error is not None:
+            cast(list[str], error_payload["warnings"]).append(str(adapter_error))
+        print(json.dumps(error_payload, indent=2))
+        return 1
 
     policy = PlanPolicy(
         max_calls=max(1, int(args.max_calls)),

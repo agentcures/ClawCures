@@ -91,9 +91,15 @@ class _LoopOpenClawClient:
         if phase == "plan-loop":
             return OpenClawResponse(
                 raw={
-                    "output_text": '{"calls":[{"tool":"refua_validate_spec","args":{}}]}'
+                    "output_text": (
+                        '{"calls":[{"tool":"refua_validate_spec","args":{"entities":'
+                        '[{"type":"protein","id":"target","sequence":"MKTAYI"}]}}]}'
+                    )
                 },
-                text='{"calls":[{"tool":"refua_validate_spec","args":{}}]}',
+                text=(
+                    '{"calls":[{"tool":"refua_validate_spec","args":{"entities":'
+                    '[{"type":"protein","id":"target","sequence":"MKTAYI"}]}}]}'
+                ),
             )
         if phase == "critic-loop":
             return OpenClawResponse(
@@ -118,3 +124,27 @@ def test_autonomous_planner_rejects_non_boolean_critic_approved() -> None:
     )
     assert result.approved is False
     assert result.iterations[0].critic["approved"] is False
+
+
+def test_autonomous_planner_canonicalizes_tool_aliases() -> None:
+    class _AliasPlanClient:
+        def create_response(self, **_kwargs: Any) -> OpenClawResponse:
+            return OpenClawResponse(
+                raw={},
+                text=(
+                    '{"calls":[{"tool":"validate_spec","args":{"entities":'
+                    '[{"type":"protein","id":"target","sequence":"MKTAYI"}]}}]}'
+                ),
+            )
+
+    planner = AutonomousPlanner(
+        openclaw=_AliasPlanClient(),  # type: ignore[arg-type]
+        available_tools=["refua_validate_spec"],
+        policy=PlanPolicy(),
+    )
+    _text, plan = planner._plan_once(
+        objective="Assess KRAS candidate quality",
+        system_prompt="Return strict JSON plans.",
+        feedback=[],
+    )
+    assert plan["calls"][0]["tool"] == "refua_validate_spec"

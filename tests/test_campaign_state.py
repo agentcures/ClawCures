@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+import refua_campaign.campaign_state as campaign_state
 from refua_campaign.campaign_state import (
     build_failure_intelligence,
     load_campaign_state,
@@ -86,3 +89,46 @@ def test_build_failure_intelligence_summarizes_failures_and_negatives() -> None:
     assert summary["failed_tool_calls"] == 2
     assert summary["negative_candidate_count"] == 1
     assert summary["top_failure_reasons"]
+
+
+def test_interrupted_state_write_keeps_previous_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "campaign_state.json"
+    persist_campaign_state(
+        objective="Find cures for all diseases.",
+        plan={"calls": []},
+        results=[],
+        promising_cures=[],
+        interesting_targets=[],
+        session_key="session-main",
+        state_path=state_path,
+    )
+    original = state_path.read_text(encoding="utf-8")
+
+    def fail_replace(_src: Path, _dst: Path) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(campaign_state.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="disk full"):
+        persist_campaign_state(
+            objective="A second cycle that must not truncate the file.",
+            plan={"calls": []},
+            results=[],
+            promising_cures=[],
+            interesting_targets=[],
+            session_key="session-main",
+            state_path=state_path,
+        )
+    assert state_path.read_text(encoding="utf-8") == original
+
+
+def test_corrupt_campaign_state_is_quarantined(tmp_path: Path) -> None:
+    state_path = tmp_path / "campaign_state.json"
+    state_path.write_text("{not-json", encoding="utf-8")
+    loaded = load_campaign_state(state_path)
+    assert loaded["runs"] == []
+    assert not state_path.exists()
+    backups = list(tmp_path.glob("campaign_state.json.*.corrupt"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "{not-json"

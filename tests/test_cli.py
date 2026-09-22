@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from refua_campaign.cli import (
     DEFAULT_OBJECTIVE,
     _append_cycle_memory_note,
     _build_state_memory_note,
     _compose_objective_with_cycle_memory,
+    _load_plan_file,
     build_parser,
 )
 from refua_campaign.refua_mcp_adapter import DEFAULT_TOOL_LIST
@@ -190,3 +193,14 @@ def test_build_state_memory_note_includes_registry_and_failures() -> None:
     assert "timeout (2)" in note
     assert "EGFR (7)" in note
     assert "compound-a (2/4)" in note
+
+
+def test_load_plan_file_canonicalizes_tool_aliases(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        '{"calls":[{"tool":"validate_spec","args":{"entities":'
+        '[{"type":"protein","id":"target","sequence":"MKTAYI"}]}}]}',
+        encoding="utf-8",
+    )
+    plan = _load_plan_file(plan_path, allowed_tools=["refua_validate_spec"])
+    assert plan["calls"][0]["tool"] == "refua_validate_spec"

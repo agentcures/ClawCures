@@ -248,7 +248,10 @@ class AutonomousPlanner:
                 instructions=instructions,
                 **request_kwargs,
             )
-        plan = _extract_json_plan(response.text)
+        plan = _extract_json_plan(
+            response.text,
+            allowed_tools=self._available_tools,
+        )
         return response.text, plan
 
     def _critic_once(

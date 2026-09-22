@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -573,3 +574,92 @@ def test_native_tool_loop_returns_recoverable_tool_errors_when_not_fail_fast() -
     assert run.results[0].tool == "web_fetch"
     assert run.results[0].output["recoverable"] is True
     assert "simulated tool failure" in run.results[0].output["error"]
+
+
+class _BudgetedSearchAdapter(_FakeAdapter):
+    def __init__(self) -> None:
+        super().__init__(["web_search", "web_fetch"])
+
+    def execute_tool(self, tool: str, args: dict[str, Any]) -> ToolExecutionResult:
+        self.native_execute_calls.append((tool, dict(args)))
+        if tool == "web_search":
+            return ToolExecutionResult(
+                tool=tool,
+                args=dict(args),
+                output={
+                    "results": [
+                        {
+                            "title": "A",
+                            "url": "https://example.org/a",
+                            "snippet": "first",
+                        },
+                        {
+                            "title": "B",
+                            "url": "https://example.org/b",
+                            "snippet": "second",
+                        },
+                    ]
+                },
+            )
+        if tool == "web_fetch":
+            return ToolExecutionResult(
+                tool=tool,
+                args=dict(args),
+                output={"url": args.get("url"), "text": f"fetched {args.get('url')}"},
+            )
+        return super().execute_tool(tool, args)
+
+
+def test_native_tool_loop_feeds_auto_fetch_back_within_budget() -> None:
+    openclaw = _FakeNativeOpenClawClient(
+        responses=[
+            OpenClawResponse(
+                raw={"id": "resp_1"},
+                text="",
+                response_id="resp_1",
+                function_calls=[
+                    OpenClawFunctionCall(
+                        call_id="call_1",
+                        name="web_search",
+                        arguments={"query": "EGFR", "count": 2},
+                    )
+                ],
+            ),
+            OpenClawResponse(
+                raw={"id": "resp_2"},
+                text="",
+                response_id="resp_2",
+                function_calls=[
+                    OpenClawFunctionCall(
+                        call_id="call_2",
+                        name="web_search",
+                        arguments={"query": "KRAS", "count": 2},
+                    )
+                ],
+            ),
+            OpenClawResponse(
+                raw={"id": "resp_3"},
+                text="Done.",
+                response_id="resp_3",
+                function_calls=[],
+            ),
+        ]
+    )
+    adapter = _BudgetedSearchAdapter()
+    orchestrator = CampaignOrchestrator(
+        openclaw=openclaw,
+        refua_mcp=adapter,
+        auto_web_fetch=True,
+        auto_web_fetch_max_urls=1,
+        native_tool_max_rounds=4,
+    )
+    run = orchestrator.run_native_tool_loop(
+        objective="Find targets",
+        system_prompt="Use tools.",
+    )
+    fetches = [call for call in adapter.native_execute_calls if call[0] == "web_fetch"]
+    assert len(fetches) == 1
+    assert fetches[0][1]["url"] == "https://example.org/a"
+    follow_up = json.dumps(openclaw.calls[1].kwargs["input_items"])
+    assert "fetched https://example.org/a" in follow_up
+    assert any(item.tool == "web_fetch" for item in run.results)

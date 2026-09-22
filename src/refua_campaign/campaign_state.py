@@ -28,9 +28,13 @@ def load_campaign_state(path: Path) -> dict[str, Any]:
         return _empty_state()
     try:
         payload = json.loads(resolved.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
+        _quarantine_corrupt_state(resolved)
+        return _empty_state()
+    except OSError:
         return _empty_state()
     if not isinstance(payload, Mapping):
+        _quarantine_corrupt_state(resolved)
         return _empty_state()
     state = _empty_state()
     for key in ("schema_version", "updated_at", "runs", "failures", "negative_results"):
@@ -325,4 +329,15 @@ def _count_promising(cures: list[Mapping[str, Any]]) -> int:
 
 def _write_state(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _quarantine_corrupt_state(path: Path) -> None:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    backup = path.with_name(f"{path.name}.{stamp}.corrupt")
+    try:
+        os.replace(path, backup)
+    except OSError:
+        return

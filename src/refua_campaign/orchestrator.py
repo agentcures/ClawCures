@@ -441,6 +441,7 @@ class CampaignOrchestrator:
         results: list[ToolExecutionResult] = []
         previous_response_id: str | None = None
         pending_input_items: list[dict[str, Any]] | None = None
+        remaining_auto_fetches = max(0, int(self._auto_web_fetch_max_urls))
 
         for round_index in range(1, rounds + 1):
             base_input_items: list[dict[str, Any]] = []
@@ -496,16 +497,21 @@ class CampaignOrchestrator:
                         "output": json.dumps(result.output, ensure_ascii=True),
                     }
                 )
-                if self._auto_web_fetch and result.tool == "web_search":
+                if (
+                    self._auto_web_fetch
+                    and result.tool == "web_search"
+                    and remaining_auto_fetches > 0
+                ):
                     expanded, generated = expand_results_with_web_fetch(
                         results=results,
                         execute_tool=self._refua_mcp.execute_tool,
-                        max_urls=self._auto_web_fetch_max_urls,
+                        max_urls=remaining_auto_fetches,
                         max_chars=self._auto_web_fetch_max_chars,
                     )
                     if generated > 0:
                         new_items = expanded[len(results) :]
                         results = expanded
+                        fetched_payload: list[dict[str, Any]] = []
                         for generated_item in new_items:
                             executed_calls.append(
                                 {
@@ -513,6 +519,21 @@ class CampaignOrchestrator:
                                     "args": generated_item.args,
                                 }
                             )
+                            fetched_payload.append(
+                                {
+                                    "tool": generated_item.tool,
+                                    "args": generated_item.args,
+                                    "output": generated_item.output,
+                                }
+                            )
+                        remaining_auto_fetches -= generated
+                        pending_input_items[-1]["output"] = json.dumps(
+                            {
+                                "search": result.output,
+                                "auto_web_fetch": fetched_payload,
+                            },
+                            ensure_ascii=True,
+                        )
         else:
             transcript.append(
                 f"Native tool loop reached max_rounds={rounds} before completion."

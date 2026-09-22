@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 DEFAULT_TOOL_LIST: tuple[str, ...] = (
     "refua_validate_spec",
@@ -920,6 +921,22 @@ def _http_get_json(url: str, *, headers: dict[str, str]) -> dict[str, Any]:
     return payload
 
 
+class _GuardedRedirectHandler(HTTPRedirectHandler):
+    """Re-check each redirect so a public URL cannot hop to a private host."""
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Request | None:
+        _validate_fetch_url(str(newurl))
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _http_get(
     url: str,
     *,
@@ -930,8 +947,9 @@ def _http_get(
         merged_headers.update(headers)
 
     request = Request(url, headers=merged_headers, method="GET")
+    opener = build_opener(_GuardedRedirectHandler)
     try:
-        with urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+        with opener.open(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
             content_bytes = response.read()
             content_type = str(response.headers.get("Content-Type") or "")
             status_code = int(response.getcode() or 200)
@@ -968,13 +986,34 @@ def _allow_private_fetch() -> bool:
 def _is_private_fetch_target(hostname: str) -> bool:
     if hostname in {"localhost", "localhost.localdomain"}:
         return True
-    if hostname.endswith(".local"):
+    if hostname.endswith(".local") or hostname.endswith(".localhost"):
         return True
 
+    literal = _literal_ip_address(hostname)
+    if literal is not None:
+        return _is_blocked_address(literal)
+
     try:
-        addr = ipaddress.ip_address(hostname)
-    except ValueError:
+        resolved = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
         return False
+    for entry in resolved:
+        sockaddr = entry[4]
+        if not sockaddr:
+            continue
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+        if _is_blocked_address(address):
+            return True
+    return False
+
+
+def _is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if isinstance(mapped, ipaddress.IPv4Address):
+        addr = mapped
     return (
         addr.is_private
         or addr.is_loopback
@@ -982,6 +1021,69 @@ def _is_private_fetch_target(hostname: str) -> bool:
         or addr.is_multicast
         or addr.is_unspecified
     )
+
+
+def _literal_ip_address(
+    hostname: str,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    return _ipv4_from_legacy_literal(hostname)
+
+
+def _ipv4_from_legacy_literal(hostname: str) -> ipaddress.IPv4Address | None:
+    """Parse inet_aton-style forms such as 2130706433, 127.1, and 0x7f000001."""
+    parts = hostname.split(".")
+    if not 1 <= len(parts) <= 4:
+        return None
+    numbers: list[int] = []
+    for part in parts:
+        parsed = _parse_ipv4_part(part)
+        if parsed is None:
+            return None
+        numbers.append(parsed)
+
+    try:
+        if len(numbers) == 1:
+            value = numbers[0]
+        elif len(numbers) == 2:
+            if numbers[0] > 0xFF or numbers[1] > 0xFFFFFF:
+                return None
+            value = (numbers[0] << 24) | numbers[1]
+        elif len(numbers) == 3:
+            if numbers[0] > 0xFF or numbers[1] > 0xFF or numbers[2] > 0xFFFF:
+                return None
+            value = (numbers[0] << 24) | (numbers[1] << 16) | numbers[2]
+        else:
+            if any(number > 0xFF for number in numbers):
+                return None
+            value = (
+                (numbers[0] << 24) | (numbers[1] << 16) | (numbers[2] << 8) | numbers[3]
+            )
+    except (TypeError, ValueError):
+        return None
+    if value < 0 or value > 0xFFFFFFFF:
+        return None
+    return ipaddress.IPv4Address(value)
+
+
+def _parse_ipv4_part(part: str) -> int | None:
+    if not part:
+        return None
+    try:
+        if part.lower().startswith("0x"):
+            if len(part) == 2:
+                return None
+            return int(part, 16)
+        if len(part) > 1 and part[0] == "0" and part.isdigit():
+            return int(part, 8)
+        if part.isdigit():
+            return int(part, 10)
+    except ValueError:
+        return None
+    return None
 
 
 def _html_to_text(value: str) -> str:
